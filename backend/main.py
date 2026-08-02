@@ -13,6 +13,7 @@ import asyncio
 import io
 import json
 import logging
+import os
 import random
 import re
 import time
@@ -314,10 +315,33 @@ def strip_tags(html: str) -> str:
 NET_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, httpx.NetworkError, httpx.TimeoutException)
 
 
+# ------------------ CLOUDFLARE TURNSTILE ------------------
+# Default is Cloudflare's official always-pass TEST secret. Set TURNSTILE_SECRET
+# (and the matching site key in the frontend config.js) for real verification.
+TURNSTILE_SECRET = os.environ.get("TURNSTILE_SECRET", "1x0000000000000000000000000000000AA")
+
+
+async def verify_turnstile(token: str, remote_ip: str | None = None) -> bool:
+    if not token:
+        return False
+    payload = {"secret": TURNSTILE_SECRET, "response": token}
+    if remote_ip:
+        payload["remoteip"] = remote_ip
+    try:
+        async with httpx.AsyncClient(verify=True, timeout=10) as client:
+            r = await client.post("https://challenges.cloudflare.com/turnstile/v0/siteverify", data=payload)
+            return bool(r.json().get("success"))
+    except Exception as e:
+        logger.error("[TURNSTILE] verify call failed: %s", e)
+        return False
+
+
 # ------------------ /login ------------------
 @app.post("/login")
-async def login(username: str = Form(...), password: str = Form(...)):
+async def login(request: Request, username: str = Form(...), password: str = Form(...), turnstile_token: str = Form(default="")):
     _validate(RE_USERNAME, username, "username")
+    if not await verify_turnstile(turnstile_token, request.client.host if request.client else None):
+        raise HTTPException(status_code=403, detail="Human verification failed. Please retry the checkbox.")
     try:
         async with httpx.AsyncClient(verify=True, limits=limits_pool, headers=DEFAULT_HEADERS, http2=True) as client:
             login_response, cookies = await login_with_retries(client, username, password, seed_cookies={})

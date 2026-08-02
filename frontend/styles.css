@@ -249,6 +249,15 @@ img { max-width: 100%; }
   margin-top: 18px;
 }
 
+/* Cloudflare Turnstile widget: centered on the card, reserves the widget's
+   height (65px) so the layout doesn't jump while it loads */
+.cf-turnstile {
+  display: flex;
+  justify-content: center;
+  min-height: 65px;
+  margin: var(--sp-1) auto var(--sp-4);
+}
+
 /* ============ App layout ============ */
 
 .app-header {
@@ -426,6 +435,50 @@ img { max-width: 100%; }
   margin: var(--sp-5) 0 var(--sp-3);
 }
 
+/* ============ Dashboard hero (current / next class) ============ */
+
+.dash-hero {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  background: linear-gradient(135deg, var(--accent-soft), rgba(108, 92, 231, 0.05));
+  border: 1px solid rgba(108, 92, 231, 0.35);
+  border-radius: var(--radius);
+  padding: var(--sp-4) var(--sp-5);
+  margin-bottom: var(--sp-5);
+  box-shadow: var(--shadow-sm);
+}
+
+.dash-hero > svg { width: 26px; height: 26px; color: var(--accent-strong); flex: none; }
+
+.dash-hero.done { background: var(--bg-card); border-color: var(--border); }
+.dash-hero.done > svg { color: var(--green); }
+
+.hero-text { min-width: 0; }
+
+.hero-title { display: block; font-weight: 600; font-size: 0.98rem; letter-spacing: -0.01em; }
+.hero-title b { font-weight: 800; }
+
+.hero-sub { display: block; color: var(--text-dim); font-size: 0.84rem; margin-top: 2px; }
+
+/* Pulsing accent dot for the in-class-now state */
+.hero-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--accent-strong);
+  flex: none;
+  animation: heroPulse 1.6s ease-out infinite;
+}
+
+@keyframes heroPulse {
+  0% { box-shadow: 0 0 0 0 rgba(108, 92, 231, 0.55); }
+  70% { box-shadow: 0 0 0 10px rgba(108, 92, 231, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(108, 92, 231, 0); }
+}
+
+/* ============ Today's classes timeline ============ */
+
 .today-list { padding: 6px 0; }
 
 .today-row {
@@ -434,13 +487,19 @@ img { max-width: 100%; }
   align-items: baseline;
   padding: 10px var(--sp-4);
   border-bottom: 1px solid var(--border);
+  border-radius: var(--radius-sm);
 }
 .today-row:last-child { border-bottom: none; }
 
-.today-slot {
-  color: var(--text-faint);
-  font-weight: 700;
-  min-width: 44px;
+.today-row.now { background: var(--accent-soft); border-bottom-color: transparent; }
+.today-row.now .today-code { color: var(--accent-strong); }
+.today-row.now .today-time { color: var(--accent-strong); }
+
+.today-time {
+  color: var(--text-dim);
+  font-weight: 600;
+  font-size: 0.8rem;
+  min-width: 96px;
   flex: none;
   font-variant-numeric: tabular-nums;
 }
@@ -490,7 +549,7 @@ img { max-width: 100%; }
 
 .tt-table {
   border-collapse: collapse;
-  min-width: 860px;
+  min-width: 780px;
   width: 100%;
   font-size: 0.78rem;
 }
@@ -513,11 +572,34 @@ img { max-width: 100%; }
   min-width: 64px;
 }
 
+/* Slot header: number on top, start time below in small dim text */
+.tt-slot-num { display: block; font-size: 0.8rem; font-weight: 800; color: var(--text); }
+.tt-slot-time {
+  display: block;
+  font-size: 0.64rem;
+  font-weight: 600;
+  color: var(--text-faint);
+  margin-top: 1px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Day column stays pinned while the table scrolls sideways (all viewports) */
 .tt-day {
   background: var(--bg-card-2);
   font-weight: 700;
   color: var(--text-dim);
   min-width: 52px;
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  box-shadow: 1px 0 0 var(--border);
+}
+
+/* Corner header cell sticks in both directions, above everything else */
+.tt-table thead th:first-child {
+  left: 0;
+  z-index: 4;
+  box-shadow: 1px 0 0 var(--border);
 }
 
 .tt-day.today {
@@ -525,7 +607,16 @@ img { max-width: 100%; }
   color: var(--accent-strong);
 }
 
-.tt-cell-free { color: var(--text-faint); font-size: 0.7rem; }
+/* Subtle tint across the whole row for the current day */
+.tt-today-row td { background-color: rgba(108, 92, 231, 0.05); }
+
+.tt-cell-free {
+  color: var(--text-faint);
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
 
 .tt-cell-class {
   background: var(--accent-soft);
@@ -536,6 +627,13 @@ img { max-width: 100%; }
 
 .tt-cell-class .tt-code { font-weight: 700; font-size: 0.74rem; display: block; word-break: keep-all; overflow-wrap: normal; hyphens: none; }
 .tt-cell-class .tt-meta { display: block; font-size: 0.66rem; color: var(--text-dim); margin-top: 2px; }
+.tt-cell-class .tt-time {
+  display: block;
+  font-size: 0.62rem;
+  color: var(--text-faint);
+  margin-top: 3px;
+  font-variant-numeric: tabular-nums;
+}
 
 .tt-cell-class.now {
   background: var(--accent);
@@ -543,6 +641,7 @@ img { max-width: 100%; }
   box-shadow: 0 0 0 2px var(--accent-strong);
 }
 .tt-cell-class.now .tt-meta { color: rgba(255, 255, 255, 0.8); }
+.tt-cell-class.now .tt-time { color: rgba(255, 255, 255, 0.7); }
 
 .tt-cell-free.now { background: var(--accent-soft); border-radius: 8px; color: var(--accent-strong); font-weight: 700; }
 
@@ -866,19 +965,6 @@ img { max-width: 100%; }
   }
   .data-table thead th:first-child { background: var(--bg-card-2); z-index: 3; }
   .data-table tbody tr.clickable:hover td:first-child { background: var(--bg-card-2); }
-
-  /* Timetable: day column stays pinned */
-  .tt-day {
-    position: sticky;
-    left: 0;
-    z-index: 2;
-    box-shadow: 1px 0 0 var(--border);
-  }
-  .tt-table thead th:first-child {
-    left: 0;
-    z-index: 4;
-    box-shadow: 1px 0 0 var(--border);
-  }
 }
 
 /* ============ Touch devices: >= 44px touch targets ============ */

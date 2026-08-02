@@ -1,5 +1,5 @@
 /* ============ KL ERP Buddy — app logic ============ */
-/* global API_BASE */
+/* global API_BASE, TURNSTILE_SITE_KEY */
 
 "use strict";
 
@@ -178,19 +178,67 @@ function parseSlot(text) {
 }
 
 const DAY_KEYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-const SLOT_COUNT = 24;
+
+// Official KL slot timings (50 min each). ERP slot keys go up to 24, but only
+// these 11 slots are real — anything above 11 is ignored everywhere.
+const SLOT_TIMES = {
+  1: ["07:10", "08:00"],
+  2: ["08:00", "08:50"],
+  3: ["09:20", "10:10"],
+  4: ["10:10", "11:00"],
+  5: ["11:10", "12:00"],
+  6: ["12:00", "12:50"],
+  7: ["13:00", "13:50"],
+  8: ["13:50", "14:40"],
+  9: ["14:50", "15:40"],
+  10: ["15:50", "16:40"],
+  11: ["16:40", "17:30"],
+};
+const SLOT_NUMBERS = Object.keys(SLOT_TIMES).map(Number).sort((a, b) => a - b);
+
+function timeToMin(hhmm) {
+  const [h, m] = hhmm.split(":").map(Number);
+  return h * 60 + m;
+}
+
+function nowMinutes() {
+  const now = new Date();
+  return now.getHours() * 60 + now.getMinutes();
+}
 
 function todayKey() {
   // JS: 0=Sun..6=Sat -> "Mon".."Sun"
   return DAY_KEYS[(new Date().getDay() + 6) % 7];
 }
 
-// Slots are assumed to be 30-minute blocks starting 08:00 (slot 1 = 08:00-08:30).
+// Slot happening right now per SLOT_TIMES (device clock), or null during breaks/off-hours.
 function currentSlot() {
-  const now = new Date();
-  const mins = now.getHours() * 60 + now.getMinutes();
-  const idx = Math.floor((mins - 8 * 60) / 30) + 1;
-  return idx >= 1 && idx <= SLOT_COUNT ? String(idx) : null;
+  const mins = nowMinutes();
+  for (const n of SLOT_NUMBERS) {
+    if (mins >= timeToMin(SLOT_TIMES[n][0]) && mins < timeToMin(SLOT_TIMES[n][1])) return n;
+  }
+  return null;
+}
+
+/* ---------- Turnstile (Cloudflare human verification) ---------- */
+// The widget div lives on the login screen; the site key is injected here so it
+// only ever lives in config.js. api.js is async: if it finished loading before
+// we set the key, its implicit render already skipped the div — render explicitly.
+(function initTurnstile() {
+  const el = $(".cf-turnstile");
+  if (!el) return;
+  el.dataset.sitekey = TURNSTILE_SITE_KEY;
+  if (window.turnstile && typeof window.turnstile.render === "function" && !el.hasChildNodes()) {
+    try { window.turnstile.render(el); } catch { /* already rendered */ }
+  }
+})();
+
+// Tokens are single-use; reset so the checkbox is fresh whenever the login
+// screen is (re-)shown (logout, session expiry, failed attempt).
+function resetTurnstile() {
+  if (window.turnstile && typeof window.turnstile.reset === "function") {
+    try { window.turnstile.reset(); } catch { /* widget not rendered yet */ }
+  }
 }
 
 /* ---------- Screens ---------- */
@@ -200,6 +248,7 @@ function showLogin() {
   $("#login-btn").disabled = false;
   $("#login-btn .btn-label").textContent = "Sign in";
   $("#login-btn .btn-spinner").classList.add("hidden");
+  resetTurnstile();
 }
 
 function showApp() {
@@ -271,6 +320,19 @@ $("#login-form").addEventListener("submit", async (e) => {
   const errEl = $("#login-error");
   errEl.classList.add("hidden");
 
+  // Human verification (Cloudflare Turnstile)
+  if (!window.turnstile || typeof window.turnstile.getResponse !== "function") {
+    errEl.textContent = "Verification failed to load — check your connection and reload the page.";
+    errEl.classList.remove("hidden");
+    return;
+  }
+  const turnstileToken = window.turnstile.getResponse();
+  if (!turnstileToken) {
+    errEl.textContent = "Please tick the verification checkbox before signing in.";
+    errEl.classList.remove("hidden");
+    return;
+  }
+
   const btn = $("#login-btn");
   btn.disabled = true;
   btn.querySelector(".btn-label").textContent = "Signing in";
@@ -280,7 +342,9 @@ $("#login-form").addEventListener("submit", async (e) => {
     const fd = new FormData();
     fd.set("username", username);
     fd.set("password", password);
+    fd.set("turnstile_token", turnstileToken);
     const res = await fetch(`${API_BASE}/login`, { method: "POST", body: fd });
+    if (res.status === 403) throw new Error("Human verification failed. Please retry the checkbox.");
     if (res.status === 503) throw new Error("ERP portal is down, try later");
     if (!res.ok) throw new Error(`Server error (HTTP ${res.status})`);
     const data = await res.json();
@@ -295,6 +359,7 @@ $("#login-form").addEventListener("submit", async (e) => {
     btn.disabled = false;
     btn.querySelector(".btn-label").textContent = "Sign in";
     btn.querySelector(".btn-spinner").classList.add("hidden");
+    resetTurnstile(); // the burnt token can't be reused — give the user a fresh checkbox
   }
 });
 
@@ -423,15 +488,72 @@ function pctClass(pct) {
   return "pct-bad";
 }
 
-function todaysClasses() {
+// Today's classes as merged blocks: consecutive slots with identical raw text
+// collapse into one block with a real time range (07:10 – 08:50 etc.).
+function todaysBlocks() {
   const day = state.timetable ? state.timetable[todayKey()] : null;
   if (!day) return [];
   const out = [];
-  for (let i = 1; i <= SLOT_COUNT; i++) {
-    const txt = day[String(i)];
-    if (txt && txt !== "-") out.push({ slot: i, ...parseSlot(txt) });
+  let i = 0;
+  while (i < SLOT_NUMBERS.length) {
+    const startSlot = SLOT_NUMBERS[i];
+    const txt = day[String(startSlot)];
+    if (!txt || txt === "-") { i++; continue; }
+    let j = i;
+    while (
+      j + 1 < SLOT_NUMBERS.length &&
+      SLOT_NUMBERS[j + 1] === SLOT_NUMBERS[j] + 1 &&
+      day[String(SLOT_NUMBERS[j + 1])] === txt
+    ) j++;
+    const endSlot = SLOT_NUMBERS[j];
+    out.push({
+      startSlot, endSlot,
+      start: SLOT_TIMES[startSlot][0],
+      end: SLOT_TIMES[endSlot][1],
+      ...parseSlot(txt),
+    });
+    i = j + 1;
   }
   return out;
+}
+
+function fmtDuration(mins) {
+  const h = Math.floor(mins / 60), m = mins % 60;
+  if (h > 0 && m > 0) return `${h}h ${m}m`;
+  if (h > 0) return `${h}h`;
+  return `${m}m`;
+}
+
+// Hero banner: current class (pulsing) / next class (with countdown) / all done.
+// Returns "" when there are no classes at all today (the empty state covers that).
+function classHero(blocks) {
+  if (blocks.length === 0) return "";
+  const mins = nowMinutes();
+  for (const b of blocks) {
+    const s = timeToMin(b.start), e = timeToMin(b.end);
+    if (mins >= s && mins < e) {
+      return `<div class="dash-hero now">
+        <span class="hero-dot" aria-hidden="true"></span>
+        <div class="hero-text">
+          <span class="hero-title">In class now: <b>${esc(b.code)}</b></span>
+          <span class="hero-sub">${esc(b.section)}${b.room ? " · " + esc(b.room) : ""} · ends ${b.end}</span>
+        </div></div>`;
+    }
+    if (mins < s) {
+      return `<div class="dash-hero next">
+        <i data-lucide="clock"></i>
+        <div class="hero-text">
+          <span class="hero-title">Next up: <b>${esc(b.code)}</b> at ${b.start}</span>
+          <span class="hero-sub">${b.room ? esc(b.room) + " " : ""}(in ${fmtDuration(s - mins)})</span>
+        </div></div>`;
+    }
+  }
+  return `<div class="dash-hero done">
+    <i data-lucide="circle-check-big"></i>
+    <div class="hero-text">
+      <span class="hero-title">No more classes today</span>
+      <span class="hero-sub">All ${blocks.length} class${blocks.length === 1 ? "" : "es"} done — enjoy the rest of your day</span>
+    </div></div>`;
 }
 
 function renderDashboard() {
@@ -439,11 +561,13 @@ function renderDashboard() {
   const box = $("#dashboard-content");
   if (state.attendance === null) { setHTML(box, skelCards(3)); return; }
   const pct = weightedAttendance(state.attendance);
-  const classes = todaysClasses();
+  const blocks = todaysBlocks();
   const courseCount = (state.attendance || []).length;
   const cls = pctClass(pct);
+  const mins = nowMinutes();
 
   setHTML(box, `
+    ${classHero(blocks)}
     <div class="stats-grid">
       <div class="stat-card">
         <div class="stat-icon"><i data-lucide="percent"></i></div>
@@ -454,7 +578,7 @@ function renderDashboard() {
       <div class="stat-card">
         <div class="stat-icon"><i data-lucide="calendar-days"></i></div>
         <div class="stat-label">Classes today</div>
-        <div class="stat-value">${classes.length}</div>
+        <div class="stat-value">${blocks.length}</div>
         <div class="stat-hint">${todayKey() === "Sun" ? "Enjoy your Sunday" : "Scheduled for today"}</div>
       </div>
       <div class="stat-card">
@@ -472,19 +596,34 @@ function renderDashboard() {
       </div>
     </div>
     <h3 class="section-title">Today's classes</h3>
-    ${classes.length === 0
+    ${blocks.length === 0
       ? emptyState("No classes today", "Your schedule is clear — or the timetable isn't published yet.", "calendar-check")
-      : `<div class="card today-list">${classes.map((c) => `
-          <div class="today-row">
-            <span class="today-slot">S${c.slot}</span>
-            <span class="today-code">${esc(c.code)}</span>
-            <span class="today-meta">${esc(c.section)}${c.room ? " · " + esc(c.room) : ""}</span>
-          </div>`).join("")}
+      : `<div class="card today-list">${blocks.map((b) => {
+          const isNow = mins >= timeToMin(b.start) && mins < timeToMin(b.end);
+          return `<div class="today-row${isNow ? " now" : ""}">
+            <span class="today-time">${b.start} – ${b.end}</span>
+            <span class="today-code">${esc(b.code)}</span>
+            <span class="today-meta">${esc(b.section)}${b.room ? " · " + esc(b.room) : ""}</span>
+          </div>`;
+        }).join("")}
         </div>`}
   `);
 }
 
 /* ---------- Render: Timetable ---------- */
+// Columns actually present in the fetched data, intersected with the 11 real
+// KL slots and sorted numerically (robust if the ERP omits trailing empties).
+function timetableColumns(tt) {
+  const present = new Set();
+  for (const day of DAY_KEYS) {
+    for (const k of Object.keys(tt[day] || {})) {
+      const n = Number(k);
+      if (SLOT_TIMES[n]) present.add(n);
+    }
+  }
+  return [...present].sort((a, b) => a - b);
+}
+
 function renderTimetable() {
   const box = $("#timetable-content");
   const tt = state.timetable || {};
@@ -493,35 +632,55 @@ function renderTimetable() {
     setHTML(box, emptyState("No timetable data", "Nothing published for this term yet.", "calendar-days"));
     return;
   }
+  const cols = timetableColumns(tt);
+  if (cols.length === 0) {
+    setHTML(box, emptyState("No timetable data", "Nothing published for this term yet.", "calendar-days"));
+    return;
+  }
   const today = todayKey();
   const nowSlot = currentSlot();
 
   let html = `<div class="tt-wrap"><table class="tt-table"><thead><tr><th>Day</th>`;
-  for (let i = 1; i <= SLOT_COUNT; i++) html += `<th>${i}</th>`;
+  for (const n of cols) {
+    html += `<th><span class="tt-slot-num">${n}</span><span class="tt-slot-time">${SLOT_TIMES[n][0]}</span></th>`;
+  }
   html += `</tr></thead><tbody>`;
 
   for (const day of DAY_KEYS) {
     const slots = tt[day] || {};
-    html += `<tr><td class="tt-day${day === today ? " today" : ""}">${day}</td>`;
-    for (let i = 1; i <= SLOT_COUNT; i++) {
-      const key = String(i);
-      const txt = slots[key];
-      const isNow = day === today && key === nowSlot;
-      if (!txt || txt === "-") {
-        html += `<td><span class="tt-cell-free${isNow ? " now" : ""}">·</span></td>`;
+    const isToday = day === today;
+    html += `<tr${isToday ? ' class="tt-today-row"' : ""}><td class="tt-day${isToday ? " today" : ""}">${day}</td>`;
+    // Merge consecutive identical cells (raw text compare) into one colspan.
+    let i = 0;
+    while (i < cols.length) {
+      const startSlot = cols[i];
+      const txt = slots[String(startSlot)] || "-";
+      let span = 1;
+      while (
+        i + span < cols.length &&
+        cols[i + span] === cols[i + span - 1] + 1 && // only merge truly adjacent slots
+        (slots[String(cols[i + span])] || "-") === txt
+      ) span++;
+      const endSlot = cols[i + span - 1];
+      const spanLabel = `${SLOT_TIMES[startSlot][0]} – ${SLOT_TIMES[endSlot][1]}`;
+      const isNow = isToday && nowSlot != null && nowSlot >= startSlot && nowSlot <= endSlot;
+      if (txt === "-") {
+        html += `<td colspan="${span}"><span class="tt-cell-free${isNow ? " now" : ""}">Free</span></td>`;
       } else {
         const p = parseSlot(txt);
-        html += `<td><div class="tt-cell-class${isNow ? " now" : ""}">
+        html += `<td colspan="${span}"><div class="tt-cell-class${isNow ? " now" : ""}">
           <span class="tt-code">${esc(p.code)}</span>
-          <span class="tt-meta">${esc(p.section)}${p.room ? "<br>" + esc(p.room) : ""}</span>
+          <span class="tt-meta">${esc(p.section)}${p.room ? " · " + esc(p.room) : ""}</span>
+          <span class="tt-time">${spanLabel}</span>
         </div></td>`;
       }
+      i += span;
     }
     html += `</tr>`;
   }
   html += `</tbody></table></div>
   <p style="color:var(--text-faint);font-size:0.76rem;margin-top:10px">
-    Current day &amp; slot are highlighted. Scroll sideways to see all 24 slots.</p>`;
+    Current day &amp; slot are highlighted. Breaks 08:50–09:20 · 12:50–13:00 · 14:40–14:50 · 15:40–15:50.</p>`;
   setHTML(box, html);
 }
 

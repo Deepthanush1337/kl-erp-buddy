@@ -43,6 +43,8 @@
           <span>Password</span>
           <input type="password" id="login-password" placeholder="ERP password" required autocomplete="current-password" />
         </label>
+        <!-- Cloudflare Turnstile — data-sitekey is injected from config.js at runtime -->
+        <div class="cf-turnstile" data-theme="dark"></div>
         <button type="submit" id="login-btn" class="btn btn-primary btn-block">
           <span class="btn-label">Sign in</span>
           <span class="btn-spinner hidden"></span>
@@ -224,6 +226,7 @@
   </footer>
 
   <script src="https://unpkg.com/lucide@latest"></script>
+  <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
   <script src="config.js"></script>
   <script src="app.js"></script>
 </body>
