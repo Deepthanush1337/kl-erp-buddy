@@ -147,6 +147,15 @@ function mockApiResponse(path) {
 }
 
 /* ---------- API ---------- */
+function friendlyHttpError(res) {
+  if (res.status === 401) return "Invalid username or password.";
+  if (res.status === 403) return "Human verification failed. Please retry the checkbox.";
+  if (res.status === 422) return "Something was off with that request. Please try again.";
+  if (res.status === 500) return "Server hiccup on our side. Try again in a minute.";
+  if (res.status === 503) return "The KL ERP portal is down or unreachable right now. Try again later.";
+  return `Something went wrong (HTTP ${res.status}). Please try again.`;
+}
+
 async function api(path, extraFields = {}) {
   if (MOCK_MODE) {
     const canned = mockApiResponse(path);
@@ -163,7 +172,7 @@ async function api(path, extraFields = {}) {
   try {
     res = await fetch(`${API_BASE}${path}`, { method: "POST", body: fd });
   } catch {
-    throw new Error("Cannot reach the server. Check your connection or API_BASE.");
+    throw new Error("Can't reach the server. Check your internet and try again.");
   }
 
   if (res.status === 401) {
@@ -173,10 +182,10 @@ async function api(path, extraFields = {}) {
     throw new Error("unauthorized");
   }
   if (res.status === 503) {
-    toast("ERP portal is down, try later", "error");
+    toast("The KL ERP portal is down right now. Try again later.", "error");
     throw new Error("erp_down");
   }
-  if (!res.ok) throw new Error(`Server error (HTTP ${res.status})`);
+  if (!res.ok) throw new Error(friendlyHttpError(res));
 
   const data = await res.json();
   if (data.cookies) saveCookies(data.cookies);   // session_refreshed: just keep new cookies
@@ -435,10 +444,13 @@ $("#login-form").addEventListener("submit", async (e) => {
     fd.set("username", username);
     fd.set("password", password);
     fd.set("turnstile_token", turnstileToken);
-    const res = await fetch(`${API_BASE}/login`, { method: "POST", body: fd });
-    if (res.status === 403) throw new Error("Human verification failed. Please retry the checkbox.");
-    if (res.status === 503) throw new Error("ERP portal is down, try later");
-    if (!res.ok) throw new Error(`Server error (HTTP ${res.status})`);
+    let res;
+    try {
+      res = await fetch(`${API_BASE}/login`, { method: "POST", body: fd });
+    } catch {
+      throw new Error("Can't reach the server. Check your internet and try again.");
+    }
+    if (!res.ok) throw new Error(friendlyHttpError(res));
     const data = await res.json();
     if (!data.success) throw new Error(data.message || "Login failed");
     saveCreds({ username, password });

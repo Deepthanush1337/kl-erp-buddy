@@ -266,7 +266,7 @@ async def login_with_retries(client: httpx.AsyncClient, username: str, password:
         if not is_login_failed(response):
             return response, cookies
         logger.warning("[LOGIN] attempt %d rejected (bad captcha or creds), retrying", attempt + 1)
-    raise HTTPException(status_code=401, detail="Invalid ERP credentials or captcha failed repeatedly.")
+    raise HTTPException(status_code=401, detail="Invalid username or password.")
 
 
 def build_cookie_jar(php_sess_id: str, csrf_cookie: str, device_id: str, server_id: str) -> dict:
