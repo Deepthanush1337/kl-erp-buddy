@@ -27,6 +27,7 @@ from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from html import unescape
 from PIL import Image
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -309,7 +310,25 @@ def build_register_url(base_url: str, href: str) -> str | None:
 
 
 def strip_tags(html: str) -> str:
-    return re.sub(r"<.*?>", "", html).strip()
+    return unescape(re.sub(r"<.*?>", "", html)).strip()
+
+
+def extract_profile(page_html: str) -> dict:
+    """Pull NAME / Roll No / Department from the header dropdown present on
+    authenticated ERP pages. Returns {} when not found."""
+    def field(label: str) -> str:
+        m = re.search(
+            r"<b>\s*" + label + r"\s*:\s*</b>\s*</div>\s*<div>(.*?)</div>",
+            page_html, re.DOTALL | re.IGNORECASE,
+        )
+        return re.sub(r"\s+", " ", strip_tags(m.group(1))) if m else ""
+
+    profile = {
+        "name": field("NAME"),
+        "roll_no": field("Roll No"),
+        "department": field("Department"),
+    }
+    return profile if profile["name"] else {}
 
 
 NET_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, httpx.NetworkError, httpx.TimeoutException)
@@ -349,6 +368,7 @@ async def login(request: Request, username: str = Form(...), password: str = For
             return {
                 "success": True,
                 "message": "Logged in.",
+                "profile": extract_profile(login_response.text),
                 "cookies": {
                     "PHPSESSID": cookies.get("PHPSESSID"),
                     "kl_erp_device_id": cookies.get("kl_erp_device_id"),
@@ -764,4 +784,45 @@ async def fetch_seating_plan(
         raise HTTPException(status_code=503, detail="University ERP portal is down or unreachable. Try again later.")
     except Exception as e:
         logger.error("[SEATING] crash: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error.")
+
+
+# ------------------ /fetch-profile ------------------
+@app.post("/fetch-profile")
+async def fetch_profile(
+    username: str = Form(...),
+    password: str = Form(...),
+    php_sess_id: str = Form(default=""),
+    csrf_cookie: str = Form(default=""),
+    device_id: str = Form(default=""),
+    server_id: str = Form(default="erp3"),
+):
+    _validate(RE_USERNAME, username, "username")
+    _validate(RE_SERVER_ID, server_id, "server_id")
+    cookie_jar = build_cookie_jar(php_sess_id, csrf_cookie, device_id, server_id)
+    dash_url = f"{BASE_URL}/index.php?r=site%2Findexindi"
+    try:
+        async with httpx.AsyncClient(verify=True, limits=limits_pool, headers=DEFAULT_HEADERS, http2=True) as client:
+            if not php_sess_id or not csrf_cookie:
+                _, cookie_jar = await login_with_retries(client, username, password, seed_cookies={})
+                php_sess_id = cookie_jar.get("PHPSESSID", "")
+
+            response = await client.get(dash_url, cookies=cookie_jar, timeout=15)
+            if response.status_code in (301, 302, 303, 500) or is_login_failed(response):
+                _, cookie_jar = await login_with_retries(client, username, password, seed_cookies=cookie_jar)
+                response = await client.get(dash_url, cookies=cookie_jar, timeout=15)
+            response.raise_for_status()
+            page = response.text
+
+        profile = extract_profile(page)
+        if not profile:
+            raise HTTPException(status_code=404, detail="Profile not found on dashboard page.")
+        return {"success": True, "profile": profile,
+                **session_payload(cookie_jar, php_sess_id, server_id, unquote(csrf_cookie) if csrf_cookie else "")}
+    except HTTPException:
+        raise
+    except NET_ERRORS:
+        raise HTTPException(status_code=503, detail="University ERP portal is down or unreachable. Try again later.")
+    except Exception as e:
+        logger.error("[PROFILE] crash: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error.")

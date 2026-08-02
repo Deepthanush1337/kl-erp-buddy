@@ -6,11 +6,13 @@
 /* ---------- Storage keys ---------- */
 const LS_COOKIES = "kl_erp_cookies";
 const LS_CREDS = "kl_erp_creds";
+const LS_PROFILE = "kl_erp_profile";
 
 /* ---------- State ---------- */
 const state = {
   creds: null,          // {username, password}
   cookies: null,        // {PHPSESSID, kl_erp_device_id, SERVERID, _csrf_token, _csrf}
+  profile: null,        // {name, roll_no, department} from /login or /fetch-profile
   timetable: null,      // raw timetable object
   attendance: null,     // array
   grades: null,         // array
@@ -90,23 +92,66 @@ $("#modal-overlay").addEventListener("click", (e) => {
 /* ---------- Storage ---------- */
 function saveCreds(c) { state.creds = c; localStorage.setItem(LS_CREDS, JSON.stringify(c)); }
 function saveCookies(c) { state.cookies = c; localStorage.setItem(LS_COOKIES, JSON.stringify(c)); }
+function saveProfile(p) { state.profile = p; localStorage.setItem(LS_PROFILE, JSON.stringify(p)); }
 function loadStored() {
   try {
     state.creds = JSON.parse(localStorage.getItem(LS_CREDS) || "null");
     state.cookies = JSON.parse(localStorage.getItem(LS_COOKIES) || "null");
-  } catch { state.creds = null; state.cookies = null; }
+    state.profile = JSON.parse(localStorage.getItem(LS_PROFILE) || "null");
+  } catch { state.creds = null; state.cookies = null; state.profile = null; }
 }
 function clearSession() {
   localStorage.removeItem(LS_CREDS);
   localStorage.removeItem(LS_COOKIES);
-  state.creds = null; state.cookies = null;
+  localStorage.removeItem(LS_PROFILE);
+  state.creds = null; state.cookies = null; state.profile = null;
   state.timetable = null; state.attendance = null;
   state.grades = null; state.seating = null;
   state.ttKey = null; state.attKey = null;
 }
 
+/* ---------- Mock data (visual testing) ---------- */
+// Append ?mock=1 to the URL to render realistic fake rows. Inactive otherwise;
+// login and the detail endpoints always hit the real backend.
+const MOCK_MODE = new URLSearchParams(location.search).has("mock");
+
+const MOCK_ATTENDANCE = [
+  { course_name: "Data Structures and Algorithms", course_code: "24CS2101", type: "Theory", section: "S-35", conducted: 42, attended: 39, absent: 3, percentage: "92.86", register_href: "mock" },
+  { course_name: "Operating Systems", course_code: "24CS3102", type: "Theory", section: "S-35", conducted: 40, attended: 35, absent: 5, percentage: "87.50", register_href: "mock" },
+  { course_name: "Database Management Systems", course_code: "24CS2103", type: "Theory", section: "S-36", conducted: 38, attended: 30, absent: 8, percentage: "78.95", register_href: "mock" },
+  { course_name: "Computer Networks", course_code: "24CS3104", type: "Theory", section: "S-35", conducted: 36, attended: 24, absent: 12, percentage: "66.67", register_href: "mock" },
+  { course_name: "Operating Systems Laboratory", course_code: "24CS3181", type: "Practical", section: "S-35", conducted: 20, attended: 19, absent: 1, percentage: "95.00", register_href: "mock" },
+  { course_name: "Professional Communication Skills", course_code: "24HS1101", type: "Theory", section: "S-37", conducted: 30, attended: 26, absent: 4, percentage: "86.67", register_href: "mock" },
+];
+
+const MOCK_GRADES = [
+  { course_name: "Mathematics I", course_code: "24MT1101", academic_year: "2024-25", semester: "Odd", credits: 4, grade: "O", grade_point: 10, target_href: "mock" },
+  { course_name: "Programming for Problem Solving", course_code: "24CS1101", academic_year: "2024-25", semester: "Odd", credits: 4, grade: "S", grade_point: 9, target_href: "mock" },
+  { course_name: "Engineering Physics", course_code: "24PH1102", academic_year: "2024-25", semester: "Odd", credits: 3, grade: "A", grade_point: 8, target_href: "mock" },
+  { course_name: "Basic Electrical Engineering", course_code: "24EE1101", academic_year: "2024-25", semester: "Odd", credits: 3, grade: "B", grade_point: 7, target_href: "mock" },
+  { course_name: "Environmental Science", course_code: "24ES1101", academic_year: "2024-25", semester: "Even", credits: 2, grade: "C", grade_point: 6, target_href: "mock" },
+  { course_name: "Workshop Practice", course_code: "24ME1181", academic_year: "2024-25", semester: "Even", credits: 2, grade: "A", grade_point: 8, target_href: "mock" },
+];
+
+const MOCK_SEATING = [
+  { date: "12-08-2026", course_code: "24CS2101", university_id: "2600031735", exam_type: "Mid Semester", time_slot: "09:00 - 11:00", room_no: "S708" },
+  { date: "14-08-2026", course_code: "24CS3102", university_id: "2600031735", exam_type: "Mid Semester", time_slot: "13:00 - 15:00", room_no: "R412" },
+  { date: "18-08-2026", course_code: "24CS2103", university_id: "2600031735", exam_type: "Quiz", time_slot: "09:00 - 10:00", room_no: "C305" },
+];
+
+function mockApiResponse(path) {
+  if (path === "/fetch-attendance") return { success: true, attendance: MOCK_ATTENDANCE };
+  if (path === "/fetch-cgpa") return { success: true, data: MOCK_GRADES };
+  if (path === "/fetch-seating-plan") return { success: true, seating_plan: MOCK_SEATING };
+  return null; // everything else goes to the real backend
+}
+
 /* ---------- API ---------- */
 async function api(path, extraFields = {}) {
+  if (MOCK_MODE) {
+    const canned = mockApiResponse(path);
+    if (canned) return canned;
+  }
   const fd = new FormData();
   if (state.creds) {
     fd.set("username", state.creds.username);
@@ -254,10 +299,11 @@ function showLogin() {
 function showApp() {
   $("#login-screen").classList.add("hidden");
   $("#app-screen").classList.remove("hidden");
-  $("#dash-greeting").textContent = greeting() + ", " + (state.creds ? state.creds.username : "");
+  renderGreeting();
   $("#dash-date").textContent = new Date().toLocaleDateString(undefined, {
     weekday: "long", day: "numeric", month: "long", year: "numeric",
   });
+  ensureProfile();
   switchTab("dashboard");
   loadDashboard();
   loadTimetable();
@@ -268,6 +314,52 @@ function greeting() {
   if (h < 12) return "Good morning";
   if (h < 17) return "Good afternoon";
   return "Good evening";
+}
+
+// KL ERP stores names surname-first ("Pothuru Deepthanush Chowdary"), so the
+// given name is the second token; single-token names just use what they have.
+function firstName(full) {
+  const parts = String(full || "").trim().split(/\s+/).filter(Boolean);
+  const pick = parts.length > 1 ? parts[1] : parts[0] || "";
+  return pick ? pick[0].toUpperCase() + pick.slice(1).toLowerCase() : "";
+}
+
+// Department strings are long ("1 - KLVZA - Department of ... -1"). The tail
+// after the last " - " is the readable part; drop the trailing section marker
+// and the "Department of" prefix to keep the subtitle tidy.
+function deptShort(dept) {
+  const s = String(dept || "").trim();
+  if (!s) return "";
+  const parts = s.split(" - ").map((p) => p.trim()).filter(Boolean);
+  let short = parts.length > 1 ? parts[parts.length - 1] : s;
+  short = short.replace(/-\d+$/, "").replace(/^department of\s+/i, "").trim();
+  return short ? short[0].toUpperCase() + short.slice(1) : s;
+}
+
+function renderGreeting() {
+  const p = state.profile;
+  const name = p && p.name ? firstName(p.name) : state.creds ? state.creds.username : "";
+  $("#dash-greeting").textContent = greeting() + (name ? ", " + name : "");
+  const sub = $("#dash-profile");
+  const bits = p ? [p.roll_no, deptShort(p.department)].filter(Boolean) : [];
+  sub.textContent = bits.join(" · ");
+  sub.classList.toggle("hidden", bits.length === 0);
+}
+
+// Lazily fill in a missing profile (e.g. a session restored from before this
+// field existed). Failure is harmless: the greeting keeps the username fallback.
+let profileFetchInFlight = false;
+async function ensureProfile() {
+  if ((state.profile && state.profile.name) || profileFetchInFlight || !state.creds) return;
+  profileFetchInFlight = true;
+  try {
+    const data = await api("/fetch-profile", { ...cookieOnlyFields() });
+    if (data.profile && data.profile.name) {
+      saveProfile(data.profile);
+      renderGreeting();
+    }
+  } catch { /* keep the fallback greeting */ }
+  finally { profileFetchInFlight = false; }
 }
 
 /* ---------- Tabs ---------- */
@@ -351,6 +443,7 @@ $("#login-form").addEventListener("submit", async (e) => {
     if (!data.success) throw new Error(data.message || "Login failed");
     saveCreds({ username, password });
     if (data.cookies) saveCookies(data.cookies);
+    if (data.profile && data.profile.name) saveProfile(data.profile);
     toast(data.message || "Signed in", "success");
     showApp();
   } catch (err) {
@@ -685,16 +778,33 @@ function renderTimetable() {
 }
 
 /* ---------- Render: Attendance ---------- */
-function bunkText(row) {
+// SVG progress ring. pct in [0,100]; null renders an empty ring with "—".
+function ringSVG(pct, { size = 64, stroke = 6, label = null } = {}) {
+  const r = (size - stroke) / 2;
+  const c = 2 * Math.PI * r;
+  const p = pct == null ? 0 : Math.max(0, Math.min(100, pct));
+  const off = c * (1 - p / 100);
+  const text = label != null ? label : pct == null ? "—" : `${p.toFixed(1)}%`;
+  return `<svg class="ring" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" aria-hidden="true">
+    <circle class="ring-track" cx="${size / 2}" cy="${size / 2}" r="${r}" stroke-width="${stroke}"></circle>
+    <circle class="ring-fill" cx="${size / 2}" cy="${size / 2}" r="${r}" stroke-width="${stroke}"
+      stroke-dasharray="${c.toFixed(2)}" stroke-dashoffset="${off.toFixed(2)}"
+      transform="rotate(-90 ${size / 2} ${size / 2})"></circle>
+    <text class="ring-text" x="50%" y="50%" text-anchor="middle" dominant-baseline="central">${esc(text)}</text>
+  </svg>`;
+}
+
+// Bunk hint as a pill badge (same thresholds as before: 75% is the minimum).
+function bunkPill(row) {
   const attended = num(row.attended), conducted = num(row.conducted);
-  const pct = conducted > 0 ? (attended / conducted) * 100 : 0;
   if (conducted === 0) return "";
+  const pct = (attended / conducted) * 100;
   if (pct >= 75) {
     const n = Math.floor(attended / 0.75 - conducted);
-    return `<div class="bunk-hint ok">You can miss ${n} more class${n === 1 ? "" : "es"}</div>`;
+    return `<span class="bunk-pill ok"><i data-lucide="circle-check-big"></i>You can miss ${n} more class${n === 1 ? "" : "es"}</span>`;
   }
   const n = Math.ceil((0.75 * conducted - attended) / 0.25);
-  return `<div class="bunk-hint warn">Attend the next ${n} class${n === 1 ? "" : "es"} to recover</div>`;
+  return `<span class="bunk-pill warn"><i data-lucide="triangle-alert"></i>Attend the next ${n} class${n === 1 ? "" : "es"} to recover</span>`;
 }
 
 function renderAttendance() {
@@ -702,43 +812,56 @@ function renderAttendance() {
   const sumBox = $("#attendance-summary");
   const box = $("#attendance-content");
 
-  const pct = weightedAttendance(rows);
-  setHTML(sumBox, rows.length === 0 ? "" : `
-    <div class="cgpa-banner" style="margin-bottom:16px">
-      <span class="cgpa-value">${pct == null ? "—" : pct.toFixed(1) + "%"}</span>
-      <span class="cgpa-label">Overall attendance (weighted)</span>
-    </div>`);
-
   if (rows.length === 0) {
+    setHTML(sumBox, "");
     setHTML(box, emptyState("No attendance records", "Nothing to show for this term yet.", "chart-column"));
     return;
   }
 
-  let html = `<div class="table-wrap"><table class="data-table"><thead><tr>
-    <th>Course</th><th class="num">Conducted</th><th class="num">Attended</th>
-    <th class="num">Absent</th><th class="num">%</th></tr></thead><tbody>`;
+  const pct = weightedAttendance(rows);
+  let attended = 0, conducted = 0;
+  for (const r of rows) { attended += num(r.attended); conducted += num(r.conducted); }
+
+  setHTML(sumBox, `
+    <div class="ring-banner ${pctClass(pct)}">
+      ${ringSVG(pct, { size: 84, stroke: 7 })}
+      <div class="ring-banner-meta">
+        <div class="ring-banner-title">Overall attendance (weighted)</div>
+        <div class="ring-banner-sub">${attended}/${conducted} classes · ${rows.length} course${rows.length === 1 ? "" : "s"}</div>
+      </div>
+    </div>`);
+
+  const safe = rows.filter((r) => num(r.percentage) >= 75).length;
+  let html = `<div class="att-strip">
+      <span class="strip-chip ok"><i data-lucide="shield-check"></i>${safe} safe</span>
+      <span class="strip-chip warn"><i data-lucide="shield-alert"></i>${rows.length - safe} at risk</span>
+    </div>
+    <div class="card-grid">`;
 
   rows.forEach((r, i) => {
     const p = num(r.percentage);
-    const badge = p >= 85 ? "pct-good" : p >= 75 ? "pct-mid" : "pct-bad";
-    html += `<tr class="clickable" data-att-idx="${i}">
-      <td class="course-cell">
-        <div class="course-name">${esc(r.course_name || r.course_code)}</div>
-        <div class="course-sub">${esc(r.course_code)} · ${esc(r.type || "")} ${esc(r.section || "")}</div>
-        ${bunkText(r)}
-      </td>
-      <td class="num">${esc(r.conducted)}</td>
-      <td class="num">${esc(r.attended)}</td>
-      <td class="num">${esc(r.absent)}</td>
-      <td class="num"><span class="pct-badge ${badge}">${esc(r.percentage)}%</span></td>
-    </tr>`;
+    const sub = [r.course_code, r.type, r.section].filter(Boolean).map(esc).join(" · ");
+    html += `<button type="button" class="card-btn att-card ${pctClass(p)}" data-att-idx="${i}">
+      <div class="cc-head">
+        <div class="cc-course">
+          <div class="cc-name">${esc(r.course_name || r.course_code)}</div>
+          <div class="cc-sub">${sub}</div>
+        </div>
+        ${ringSVG(p)}
+      </div>
+      <div class="att-stats">
+        <div class="att-stat"><b>${esc(r.conducted)}</b><span>Conducted</span></div>
+        <div class="att-stat"><b>${esc(r.attended)}</b><span>Attended</span></div>
+        <div class="att-stat"><b>${esc(r.absent)}</b><span>Absent</span></div>
+      </div>
+      ${bunkPill(r)}
+    </button>`;
   });
-  html += `</tbody></table></div>
-  <p style="color:var(--text-faint);font-size:0.76rem;margin-top:10px">Tap a course for day-by-day details.</p>`;
+  html += `</div><p class="grid-hint">Tap a course for day-by-day details.</p>`;
   setHTML(box, html);
 
-  box.querySelectorAll("[data-att-idx]").forEach((tr) =>
-    tr.addEventListener("click", () => openRegisterDetail(rows[+tr.dataset.attIdx])));
+  box.querySelectorAll("[data-att-idx]").forEach((el) =>
+    el.addEventListener("click", () => openRegisterDetail(rows[+el.dataset.attIdx])));
 }
 
 async function openRegisterDetail(row) {
@@ -774,6 +897,16 @@ async function openRegisterDetail(row) {
 }
 
 /* ---------- Render: Grades ---------- */
+// Chip color per grade letter: O/S gold-ish, A green, B blue, F red, rest muted.
+function gradeChipClass(g) {
+  const t = String(g || "").trim().toUpperCase();
+  if (t === "O" || t === "S") return "grade-top";
+  if (t === "A") return "grade-a";
+  if (t === "B") return "grade-b";
+  if (t === "F") return "grade-f";
+  return "";
+}
+
 function renderGrades() {
   const rows = state.grades || [];
   const sumBox = $("#grades-summary");
@@ -790,31 +923,37 @@ function renderGrades() {
   const cgpa = cr > 0 ? gp / cr : null;
 
   setHTML(sumBox, cgpa == null ? "" : `
-    <div class="cgpa-banner">
-      <span class="cgpa-value">${cgpa.toFixed(2)}</span>
-      <span class="cgpa-label">CGPA · ${cr} credits</span>
+    <div class="ring-banner">
+      ${ringSVG(cgpa * 10, { size: 84, stroke: 7, label: cgpa.toFixed(2) })}
+      <div class="ring-banner-meta">
+        <div class="ring-banner-title">CGPA</div>
+        <div class="ring-banner-sub">${cr} credits · ${rows.length} course${rows.length === 1 ? "" : "s"}</div>
+      </div>
     </div>`);
 
-  let html = `<div class="table-wrap"><table class="data-table"><thead><tr>
-    <th>Course</th><th>Term</th><th class="num">Credits</th><th>Grade</th>
-    </tr></thead><tbody>`;
+  let html = `<div class="card-grid">`;
   rows.forEach((r, i) => {
-    html += `<tr class="clickable" data-grade-idx="${i}">
-      <td class="course-cell">
-        <div class="course-name">${esc(r.course_name || r.course_code)}</div>
-        <div class="course-sub">${esc(r.course_code)}</div>
-      </td>
-      <td>${esc(r.academic_year)} ${esc(r.semester)}</td>
-      <td class="num">${esc(r.credits)}</td>
-      <td><span class="grade-chip">${esc(r.grade)}</span></td>
-    </tr>`;
+    const term = [r.academic_year, r.semester].filter(Boolean).map(esc).join(" ");
+    html += `<button type="button" class="card-btn" data-grade-idx="${i}">
+      <div class="cc-head">
+        <div class="cc-course">
+          <div class="cc-name">${esc(r.course_name || r.course_code)}</div>
+          <div class="cc-sub">${esc(r.course_code)}</div>
+        </div>
+        <span class="grade-chip ${gradeChipClass(r.grade)}">${esc(r.grade)}</span>
+      </div>
+      <div class="meta-row">
+        <span class="meta-item"><i data-lucide="layers"></i>${esc(r.credits)} credits</span>
+        <span class="meta-item"><i data-lucide="star"></i>${esc(r.grade_point)} grade points</span>
+        ${term ? `<span class="meta-item"><i data-lucide="calendar-days"></i>${term}</span>` : ""}
+      </div>
+    </button>`;
   });
-  html += `</tbody></table></div>
-  <p style="color:var(--text-faint);font-size:0.76rem;margin-top:10px">Tap a course for the full scorecard.</p>`;
+  html += `</div><p class="grid-hint">Tap a course for the full scorecard.</p>`;
   setHTML(box, html);
 
-  box.querySelectorAll("[data-grade-idx]").forEach((tr) =>
-    tr.addEventListener("click", () => openMarksDetail(rows[+tr.dataset.gradeIdx])));
+  box.querySelectorAll("[data-grade-idx]").forEach((el) =>
+    el.addEventListener("click", () => openMarksDetail(rows[+el.dataset.gradeIdx])));
 }
 
 async function openMarksDetail(row) {
@@ -842,6 +981,29 @@ async function openMarksDetail(row) {
 }
 
 /* ---------- Render: Exams ---------- */
+// Tolerant exam-date parsing for the calendar tile: ISO (2026-08-14),
+// dd-mm-yyyy / dd/mm/yyyy, or anything Date.parse understands ("14 Aug 2026").
+function examDateParts(s) {
+  const str = String(s || "").trim();
+  if (!str) return null;
+  let d = null;
+  let m = str.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (m) d = new Date(+m[1], +m[2] - 1, +m[3]);
+  if (!d) {
+    m = str.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})/);
+    if (m) {
+      const yy = +m[3] < 100 ? 2000 + +m[3] : +m[3];
+      d = new Date(yy, +m[2] - 1, +m[1]);
+    }
+  }
+  if (!d) {
+    const t = Date.parse(str);
+    if (!Number.isNaN(t)) d = new Date(t);
+  }
+  if (!d || Number.isNaN(d.getTime())) return null;
+  return { day: d.getDate(), mon: d.toLocaleString(undefined, { month: "short" }) };
+}
+
 function renderSeating() {
   const rows = state.seating || [];
   const box = $("#exams-content");
@@ -849,20 +1011,26 @@ function renderSeating() {
     setHTML(box, emptyState("No exams scheduled", "Your seating plan will appear here before exams.", "armchair"));
     return;
   }
-  let html = `<div class="table-wrap"><table class="data-table"><thead><tr>
-    <th>Date</th><th>Course</th><th>Exam</th><th>Time slot</th><th>Room</th>
-    </tr></thead><tbody>`;
+  let html = `<div class="card-grid">`;
   for (const r of rows) {
-    html += `<tr>
-      <td style="font-weight:600">${esc(r.date)}</td>
-      <td class="course-cell"><div class="course-name">${esc(r.course_code)}</div>
-        <div class="course-sub">${esc(r.university_id || "")}</div></td>
-      <td>${esc(r.exam_type)}</td>
-      <td>${esc(r.time_slot)}</td>
-      <td><span class="grade-chip">${esc(r.room_no)}</span></td>
-    </tr>`;
+    const d = examDateParts(r.date);
+    html += `<div class="card exam-card">
+      <div class="exam-date">${d
+        ? `<span class="exam-day">${d.day}</span><span class="exam-mon">${esc(d.mon)}</span>`
+        : `<span class="exam-date-raw">${esc(r.date)}</span>`}</div>
+      <div class="exam-info">
+        <div class="exam-head">
+          <span class="exam-code">${esc(r.course_code)}</span>
+          <span class="chip-accent">${esc(r.exam_type)}</span>
+        </div>
+        <div class="meta-row">
+          <span class="meta-item"><i data-lucide="clock"></i>${esc(r.time_slot)}</span>
+          <span class="meta-item"><i data-lucide="door-open"></i>${esc(r.room_no)}</span>
+        </div>
+      </div>
+    </div>`;
   }
-  html += `</tbody></table></div>`;
+  html += `</div>`;
   setHTML(box, html);
 }
 
