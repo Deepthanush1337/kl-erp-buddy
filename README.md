@@ -76,6 +76,12 @@ Render free tier sleeps after 15 min idle; the first request after a sleep takes
 
 ## Notes
 
+- **Turnstile:** the login form has a Cloudflare Turnstile checkbox, verified server-side
+  on `POST /login`. Both sides ship with Cloudflare's official always-pass **test**
+  keypair (site key in `frontend/config.js`, secret default in `backend/main.py`) so it
+  works out of the box — the widget shows a "for testing only" watermark until you swap
+  in a real keypair from the Cloudflare dashboard (set `TURNSTILE_SECRET` as a Render
+  env var and `TURNSTILE_SITE_KEY` in `frontend/config.js`).
 - Academic-year → ERP code mapping is **not** a clean formula: 2024-25→16,
   2025-26→19, 2026-27→29 (see `academicYearCode()` in `frontend/app.js`). Extend the
   map when a new academic year starts.
