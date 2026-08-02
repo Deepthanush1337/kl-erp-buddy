@@ -35,13 +35,36 @@ function num(v) {
   return Number.isFinite(n) ? n : 0;
 }
 
+/* ---------- Icons (Lucide) ---------- */
+// Re-renders all <i data-lucide> placeholders as SVGs. No-ops when the CDN
+// script is unavailable (e.g. offline), leaving the placeholders harmlessly empty.
+function refreshIcons() {
+  if (window.lucide && typeof window.lucide.createIcons === "function") {
+    window.lucide.createIcons();
+  }
+}
+
+// Every dynamic markup injection goes through here so icons are always re-rendered.
+function setHTML(target, html) {
+  const el = typeof target === "string" ? $(target) : target;
+  el.innerHTML = html;
+  refreshIcons();
+}
+
 /* ---------- Toasts ---------- */
+const TOAST_ICONS = { success: "circle-check-big", error: "triangle-alert", info: "info" };
+
 function toast(msg, type = "info") {
   const box = $("#toast-container");
   const el = document.createElement("div");
   el.className = `toast toast-${type}`;
-  el.textContent = msg;
+  const icon = document.createElement("i");
+  icon.setAttribute("data-lucide", TOAST_ICONS[type] || TOAST_ICONS.info);
+  const text = document.createElement("span");
+  text.textContent = msg;
+  el.append(icon, text);
   box.appendChild(el);
+  refreshIcons();
   setTimeout(() => {
     el.classList.add("toast-out");
     setTimeout(() => el.remove(), 300);
@@ -51,7 +74,7 @@ function toast(msg, type = "info") {
 /* ---------- Modal ---------- */
 function openModal(title, bodyHTML) {
   $("#modal-title").textContent = title;
-  $("#modal-body").innerHTML = bodyHTML;
+  setHTML("#modal-body", bodyHTML);
   $("#modal-overlay").classList.remove("hidden");
   document.body.style.overflow = "hidden";
 }
@@ -140,7 +163,7 @@ function buildYearOptions(sel) {
     const label = `${y}-${String((y + 1) % 100).padStart(2, "0")}`;
     html += `<option value="${esc(label)}"${y === curStart ? " selected" : ""}>${esc(label)}</option>`;
   }
-  sel.innerHTML = html;
+  setHTML(sel, html);
 }
 
 /* ---------- Slot parsing ---------- */
@@ -235,8 +258,8 @@ function skelRows(n) {
 function skelCards(n) {
   return Array.from({ length: n }, () => `<div class="skeleton skel-card"></div>`).join("");
 }
-function emptyState(title, sub, icon = "📭") {
-  return `<div class="empty-state"><div class="empty-icon">${esc(icon)}</div>
+function emptyState(title, sub, icon = "inbox") {
+  return `<div class="empty-state"><div class="empty-icon"><i data-lucide="${esc(icon)}"></i></div>
     <div class="empty-title">${esc(title)}</div><div class="empty-sub">${esc(sub)}</div></div>`;
 }
 
@@ -294,7 +317,7 @@ function semParams(yearSel, semSel) {
 async function loadTimetable(force) {
   const key = `${$("#tt-year").value}-${$("#tt-semester").value}`;
   if (!force && state.timetable && state.ttKey === key) { renderTimetable(); return; }
-  $("#timetable-content").innerHTML = skelRows(5);
+  setHTML("#timetable-content", skelRows(5));
   try {
     const data = await api("/fetch-timetable", { ...semParams("#tt-year", "#tt-semester"), ...cookieOnlyFields() });
     state.timetable = data.timetable || {};
@@ -303,7 +326,7 @@ async function loadTimetable(force) {
     renderDashboard();
   } catch (err) {
     if (err.message !== "unauthorized") {
-      $("#timetable-content").innerHTML = emptyState("Could not load timetable", err.message, "🗓️");
+      setHTML("#timetable-content", emptyState("Could not load timetable", err.message, "calendar-days"));
     }
   }
 }
@@ -322,8 +345,8 @@ function cookieOnlyFields() {
 async function loadAttendance(force) {
   const key = `${$("#att-year").value}-${$("#att-semester").value}`;
   if (!force && state.attendance && state.attKey === key) { renderAttendance(); return; }
-  $("#attendance-content").innerHTML = skelRows(5);
-  $("#attendance-summary").innerHTML = "";
+  setHTML("#attendance-content", skelRows(5));
+  setHTML("#attendance-summary", "");
   try {
     const data = await api("/fetch-attendance", { ...semParams("#att-year", "#att-semester"), ...cookieOnlyFields() });
     state.attendance = data.attendance || [];
@@ -332,42 +355,42 @@ async function loadAttendance(force) {
     renderDashboard();
   } catch (err) {
     if (err.message !== "unauthorized") {
-      $("#attendance-content").innerHTML = emptyState("Could not load attendance", err.message, "📊");
+      setHTML("#attendance-content", emptyState("Could not load attendance", err.message, "chart-column"));
     }
   }
 }
 
 async function loadGrades(force) {
   if (!force && state.grades) { renderGrades(); return; }
-  $("#grades-content").innerHTML = skelRows(5);
-  $("#grades-summary").innerHTML = "";
+  setHTML("#grades-content", skelRows(5));
+  setHTML("#grades-summary", "");
   try {
     const data = await api("/fetch-cgpa", { ...cookieOnlyFields() });
     state.grades = data.data || [];
     renderGrades();
   } catch (err) {
     if (err.message !== "unauthorized") {
-      $("#grades-content").innerHTML = emptyState("Could not load grades", err.message, "🎓");
+      setHTML("#grades-content", emptyState("Could not load grades", err.message, "graduation-cap"));
     }
   }
 }
 
 async function loadSeating(force) {
   if (!force && state.seating) { renderSeating(); return; }
-  $("#exams-content").innerHTML = skelRows(4);
+  setHTML("#exams-content", skelRows(4));
   try {
     const data = await api("/fetch-seating-plan", { ...cookieOnlyFields() });
     state.seating = data.seating_plan || [];
     renderSeating();
   } catch (err) {
     if (err.message !== "unauthorized") {
-      $("#exams-content").innerHTML = emptyState("Could not load seating plan", err.message, "🪑");
+      setHTML("#exams-content", emptyState("Could not load seating plan", err.message, "armchair"));
     }
   }
 }
 
 async function loadDashboard() {
-  $("#dashboard-content").innerHTML = skelCards(3);
+  setHTML("#dashboard-content", skelCards(3));
   // Dashboard composes timetable + attendance; fetch attendance for current term if needed
   if (!state.attendance) {
     try {
@@ -414,31 +437,35 @@ function todaysClasses() {
 function renderDashboard() {
   if (state.activeTab !== "dashboard") return;
   const box = $("#dashboard-content");
-  if (state.attendance === null) { box.innerHTML = skelCards(3); return; }
+  if (state.attendance === null) { setHTML(box, skelCards(3)); return; }
   const pct = weightedAttendance(state.attendance);
   const classes = todaysClasses();
   const courseCount = (state.attendance || []).length;
   const cls = pctClass(pct);
 
-  box.innerHTML = `
+  setHTML(box, `
     <div class="stats-grid">
       <div class="stat-card">
+        <div class="stat-icon"><i data-lucide="percent"></i></div>
         <div class="stat-label">Overall attendance</div>
         <div class="stat-value ${cls}">${pct == null ? "—" : pct.toFixed(1) + "%"}</div>
         <div class="stat-hint">${courseCount} course${courseCount === 1 ? "" : "s"} this term</div>
       </div>
       <div class="stat-card">
+        <div class="stat-icon"><i data-lucide="calendar-days"></i></div>
         <div class="stat-label">Classes today</div>
         <div class="stat-value">${classes.length}</div>
         <div class="stat-hint">${todayKey() === "Sun" ? "Enjoy your Sunday" : "Scheduled for today"}</div>
       </div>
       <div class="stat-card">
+        <div class="stat-icon"><i data-lucide="shield-alert"></i></div>
         <div class="stat-label">Attendance risk</div>
-        <div class="stat-value ${pct != null && pct < 75 ? "pct-bad" : "pct-good"}">
-          ${pct == null ? "—" : pct < 75 ? "Low" : "Safe"}</div>
+        <div class="stat-value ${pct == null ? "" : pct < 75 ? "pct-bad" : "pct-good"}">
+          ${pct == null ? "—" : pct < 75 ? "At risk" : "Safe"}</div>
         <div class="stat-hint">75% is the minimum</div>
       </div>
       <div class="stat-card">
+        <div class="stat-icon"><i data-lucide="book-open"></i></div>
         <div class="stat-label">Term</div>
         <div class="stat-value" style="font-size:1.15rem">${esc($("#tt-year").value)}</div>
         <div class="stat-hint">${esc($("#tt-semester option:checked").textContent)} semester</div>
@@ -446,7 +473,7 @@ function renderDashboard() {
     </div>
     <h3 class="section-title">Today's classes</h3>
     ${classes.length === 0
-      ? emptyState("No classes today", "Your schedule is clear — or the timetable isn't published yet.", "🎉")
+      ? emptyState("No classes today", "Your schedule is clear — or the timetable isn't published yet.", "calendar-check")
       : `<div class="card today-list">${classes.map((c) => `
           <div class="today-row">
             <span class="today-slot">S${c.slot}</span>
@@ -454,7 +481,7 @@ function renderDashboard() {
             <span class="today-meta">${esc(c.section)}${c.room ? " · " + esc(c.room) : ""}</span>
           </div>`).join("")}
         </div>`}
-  `;
+  `);
 }
 
 /* ---------- Render: Timetable ---------- */
@@ -463,7 +490,7 @@ function renderTimetable() {
   const tt = state.timetable || {};
   const hasAny = DAY_KEYS.some((d) => tt[d] && Object.values(tt[d]).some((v) => v && v !== "-"));
   if (!hasAny) {
-    box.innerHTML = emptyState("No timetable data", "Nothing published for this term yet.", "🗓️");
+    setHTML(box, emptyState("No timetable data", "Nothing published for this term yet.", "calendar-days"));
     return;
   }
   const today = todayKey();
@@ -495,7 +522,7 @@ function renderTimetable() {
   html += `</tbody></table></div>
   <p style="color:var(--text-faint);font-size:0.76rem;margin-top:10px">
     Current day &amp; slot are highlighted. Scroll sideways to see all 24 slots.</p>`;
-  box.innerHTML = html;
+  setHTML(box, html);
 }
 
 /* ---------- Render: Attendance ---------- */
@@ -517,14 +544,14 @@ function renderAttendance() {
   const box = $("#attendance-content");
 
   const pct = weightedAttendance(rows);
-  sumBox.innerHTML = rows.length === 0 ? "" : `
+  setHTML(sumBox, rows.length === 0 ? "" : `
     <div class="cgpa-banner" style="margin-bottom:16px">
       <span class="cgpa-value">${pct == null ? "—" : pct.toFixed(1) + "%"}</span>
       <span class="cgpa-label">Overall attendance (weighted)</span>
-    </div>`;
+    </div>`);
 
   if (rows.length === 0) {
-    box.innerHTML = emptyState("No attendance records", "Nothing to show for this term yet.", "📊");
+    setHTML(box, emptyState("No attendance records", "Nothing to show for this term yet.", "chart-column"));
     return;
   }
 
@@ -549,7 +576,7 @@ function renderAttendance() {
   });
   html += `</tbody></table></div>
   <p style="color:var(--text-faint);font-size:0.76rem;margin-top:10px">Tap a course for day-by-day details.</p>`;
-  box.innerHTML = html;
+  setHTML(box, html);
 
   box.querySelectorAll("[data-att-idx]").forEach((tr) =>
     tr.addEventListener("click", () => openRegisterDetail(rows[+tr.dataset.attIdx])));
@@ -570,7 +597,7 @@ async function openRegisterDetail(row) {
     }
     html += `</div><div class="modal-section-title">Day-by-day</div>`;
     if (days.length === 0) {
-      html += emptyState("No daily records", "No register entries found.", "🗒️");
+      html += emptyState("No daily records", "No register entries found.", "notebook-pen");
     } else {
       html += `<div class="day-grid">` + days.map((d) => {
         const st = d.status === "P" ? "st-P" : d.status === "A" ? "st-A" : "st-other";
@@ -579,10 +606,10 @@ async function openRegisterDetail(row) {
           <span class="day-status">${esc(label)}</span></div>`;
       }).join("") + `</div>`;
     }
-    $("#modal-body").innerHTML = html;
+    setHTML("#modal-body", html);
   } catch (err) {
     if (err.message !== "unauthorized") {
-      $("#modal-body").innerHTML = emptyState("Could not load details", err.message, "⚠️");
+      setHTML("#modal-body", emptyState("Could not load details", err.message, "triangle-alert"));
     } else closeModal();
   }
 }
@@ -594,8 +621,8 @@ function renderGrades() {
   const box = $("#grades-content");
 
   if (rows.length === 0) {
-    sumBox.innerHTML = "";
-    box.innerHTML = emptyState("No results yet", "Grades will appear here once published.", "🎓");
+    setHTML(sumBox, "");
+    setHTML(box, emptyState("No results yet", "Grades will appear here once published.", "graduation-cap"));
     return;
   }
 
@@ -603,11 +630,11 @@ function renderGrades() {
   for (const r of rows) { gp += num(r.grade_point) * num(r.credits); cr += num(r.credits); }
   const cgpa = cr > 0 ? gp / cr : null;
 
-  sumBox.innerHTML = cgpa == null ? "" : `
+  setHTML(sumBox, cgpa == null ? "" : `
     <div class="cgpa-banner">
       <span class="cgpa-value">${cgpa.toFixed(2)}</span>
       <span class="cgpa-label">CGPA · ${cr} credits</span>
-    </div>`;
+    </div>`);
 
   let html = `<div class="table-wrap"><table class="data-table"><thead><tr>
     <th>Course</th><th>Term</th><th class="num">Credits</th><th>Grade</th>
@@ -625,7 +652,7 @@ function renderGrades() {
   });
   html += `</tbody></table></div>
   <p style="color:var(--text-faint);font-size:0.76rem;margin-top:10px">Tap a course for the full scorecard.</p>`;
-  box.innerHTML = html;
+  setHTML(box, html);
 
   box.querySelectorAll("[data-grade-idx]").forEach((tr) =>
     tr.addEventListener("click", () => openMarksDetail(rows[+tr.dataset.gradeIdx])));
@@ -641,16 +668,16 @@ async function openMarksDetail(row) {
     const entries = Object.entries(sc);
     let html = `<div class="modal-section-title">Scorecard</div>`;
     if (entries.length === 0) {
-      html += emptyState("No scorecard data", "Details are not available yet.", "📄");
+      html += emptyState("No scorecard data", "Details are not available yet.", "file-text");
     } else {
       html += `<div class="kv-grid">` + entries.map(([k, v]) =>
         `<div class="kv-row"><span class="kv-key">${esc(k)}</span><span class="kv-val">${esc(v)}</span></div>`
       ).join("") + `</div>`;
     }
-    $("#modal-body").innerHTML = html;
+    setHTML("#modal-body", html);
   } catch (err) {
     if (err.message !== "unauthorized") {
-      $("#modal-body").innerHTML = emptyState("Could not load scorecard", err.message, "⚠️");
+      setHTML("#modal-body", emptyState("Could not load scorecard", err.message, "triangle-alert"));
     } else closeModal();
   }
 }
@@ -660,7 +687,7 @@ function renderSeating() {
   const rows = state.seating || [];
   const box = $("#exams-content");
   if (rows.length === 0) {
-    box.innerHTML = emptyState("No exams scheduled", "Your seating plan will appear here before exams.", "🪑");
+    setHTML(box, emptyState("No exams scheduled", "Your seating plan will appear here before exams.", "armchair"));
     return;
   }
   let html = `<div class="table-wrap"><table class="data-table"><thead><tr>
@@ -677,7 +704,7 @@ function renderSeating() {
     </tr>`;
   }
   html += `</tbody></table></div>`;
-  box.innerHTML = html;
+  setHTML(box, html);
 }
 
 /* ---------- Selectors ---------- */
@@ -695,3 +722,4 @@ if (state.creds && state.cookies) {
 } else {
   showLogin();
 }
+refreshIcons(); // static placeholders (nav, buttons) on first paint

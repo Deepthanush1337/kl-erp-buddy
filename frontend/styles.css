@@ -69,7 +69,21 @@ body {
 button { font-family: inherit; cursor: pointer; touch-action: manipulation; }
 input, select { font-family: inherit; }
 
-svg { fill: currentColor; }
+/* Lucide icons are stroke-based; the global fill would paint them solid */
+svg:not(.lucide) { fill: currentColor; }
+
+/* Lucide base: inherit text color, size 1em by default, sized per context below */
+.lucide {
+  width: 1em;
+  height: 1em;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vertical-align: middle;
+  flex: none;
+}
 
 img { max-width: 100%; }
 
@@ -301,14 +315,14 @@ img { max-width: 100%; }
   gap: 3px;
   background: none;
   border: none;
-  color: var(--text-faint);
+  color: #a5aebd; /* >= 4.5:1 on the nav bg (WCAG AA for small labels) */
   font-size: 0.66rem;
   font-weight: 600;
   padding: 6px 2px;
   transition: color 0.15s ease;
 }
 
-.nav-btn svg { width: 22px; height: 22px; }
+.nav-btn svg { width: 20px; height: 20px; }
 
 .nav-btn.active { color: var(--accent-strong); }
 
@@ -380,6 +394,10 @@ img { max-width: 100%; }
   box-shadow: var(--shadow-sm);
   min-width: 0;
 }
+
+.stat-card .stat-icon { color: var(--accent-strong); margin-bottom: var(--sp-2); }
+
+.stat-card .stat-icon svg { width: 22px; height: 22px; }
 
 .stat-card .stat-label {
   font-size: 0.74rem;
@@ -516,7 +534,7 @@ img { max-width: 100%; }
   margin: 1px;
 }
 
-.tt-cell-class .tt-code { font-weight: 700; font-size: 0.78rem; display: block; }
+.tt-cell-class .tt-code { font-weight: 700; font-size: 0.74rem; display: block; word-break: keep-all; overflow-wrap: normal; hyphens: none; }
 .tt-cell-class .tt-meta { display: block; font-size: 0.66rem; color: var(--text-dim); margin-top: 2px; }
 
 .tt-cell-class.now {
@@ -683,7 +701,8 @@ img { max-width: 100%; }
   border-radius: var(--radius);
 }
 
-.empty-state .empty-icon { font-size: 2.2rem; margin-bottom: 10px; }
+.empty-state .empty-icon { color: var(--text-faint); margin-bottom: 10px; }
+.empty-state .empty-icon svg { width: 48px; height: 48px; stroke-width: 1.5; }
 .empty-state .empty-title { font-weight: 700; color: var(--text); margin-bottom: var(--sp-1); }
 .empty-state .empty-sub { font-size: 0.85rem; }
 
@@ -808,6 +827,9 @@ img { max-width: 100%; }
 }
 
 .toast {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   padding: var(--sp-3) var(--sp-4);
   border-radius: 12px;
   font-size: 0.88rem;
@@ -818,6 +840,8 @@ img { max-width: 100%; }
   background: var(--bg-card-2);
   color: var(--text);
 }
+
+.toast svg { width: 16px; height: 16px; flex: none; }
 
 .toast.toast-error { background: #2a1518; border-color: rgba(255, 92, 92, 0.4); color: #ffb4b4; }
 .toast.toast-success { background: #12271b; border-color: rgba(46, 213, 115, 0.4); color: #a9f0c8; }
@@ -897,7 +921,7 @@ img { max-width: 100%; }
     min-height: 0;
   }
 
-  .nav-btn svg { width: 18px; height: 18px; }
+  .nav-btn svg { width: 20px; height: 20px; }
 
   .nav-btn.active { background: var(--accent-soft); }
 
@@ -918,6 +942,16 @@ img { max-width: 100%; }
   #toast-container { bottom: var(--sp-6); }
 
   .kv-grid { grid-template-columns: 1fr 1fr; }
+}
+
+/* Compact header for narrow-desktop range (iPad portrait etc.) so all
+   nav buttons + logout stay reachable without horizontal overflow */
+@media (min-width: 768px) and (max-width: 899px) {
+  .app-header-inner { gap: var(--sp-2); padding-left: var(--sp-3); padding-right: var(--sp-3); }
+  .app-brand-name { display: none; }
+  .nav-btn { padding: var(--sp-2) 8px; font-size: 0.78rem; gap: 6px; }
+  .nav-btn svg { width: 18px; height: 18px; }
+  #logout-btn .logout-label { display: none; }
 }
 
 /* ============ Reduced motion ============ */
