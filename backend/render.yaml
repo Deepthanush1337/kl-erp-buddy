@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: kl-erp-buddy-api
+    runtime: docker
+    plan: free
+    autoDeploy: true
+    healthCheckPath: /

@@ -1,0 +1,691 @@
+"""
+KL ERP Buddy — backend proxy for newerp.kluniversity.in
+
+Logs into the KL University ERP on behalf of the student (their own account),
+solving the Yii login captcha with a small CRNN (CTC) ONNX model, then scrapes
+timetable / attendance / grades / seating-plan HTML and returns clean JSON.
+
+Captcha model (model/crnn.onnx) and the overall scraping protocol are adapted
+from the public senior project: github.com/sivadhanushreddykotturu/render_testb_docker
+"""
+
+import asyncio
+import io
+import json
+import logging
+import random
+import re
+import time
+from contextlib import asynccontextmanager
+from urllib.parse import unquote, urlparse
+
+import httpx
+import numpy as np
+import onnxruntime as ort
+from fastapi import FastAPI, Form, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from PIL import Image
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger("kl-erp-buddy")
+
+# ------------------ CAPTCHA SOLVER ------------------
+try:
+    with open("model/crnn.json", "r") as f:
+        _captcha_meta = json.load(f)
+    _captcha_alphabet = _captcha_meta["alphabet"]
+    _captcha_img_w = _captcha_meta["img_w"]
+    _captcha_img_h = _captcha_meta["img_h"]
+    _captcha_session = ort.InferenceSession("model/crnn.onnx")
+    logger.info("Captcha model loaded (%s)", _captcha_meta.get("model_kind"))
+except Exception as e:
+    logger.error("Failed to load captcha model: %s", e)
+    _captcha_session = None
+
+
+def solve_captcha(image_bytes: bytes) -> str:
+    img = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
+    img = img.resize((_captcha_img_w, _captcha_img_h))
+    alpha = np.array(img)[:, :, 3].astype(np.float32) / 255.0
+    tensor = alpha[np.newaxis, np.newaxis, :, :]
+    inputs = {_captcha_session.get_inputs()[0].name: tensor}
+    logits = _captcha_session.run(None, inputs)[0][0]
+    out, last = [], -1
+    for t in range(logits.shape[0]):
+        best = int(np.argmax(logits[t]))
+        if best != last and best != 0:
+            out.append(_captcha_alphabet[best - 1])
+        last = best
+    return "".join(out)
+
+
+# ------------------ CONSTANTS ------------------
+BASE_URL = "https://newerp.kluniversity.in"
+
+DEFAULT_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-IN,en-GB;q=0.9,en-US;q=0.8",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+}
+
+limits_pool = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global limits_pool
+    limits_pool = httpx.Limits(max_keepalive_connections=50, max_connections=200, keepalive_expiry=30.0)
+    yield
+
+
+app = FastAPI(title="KL ERP Buddy Backend", version="1.0.0", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    return JSONResponse(status_code=422, content={"success": False, "message": "Bad request.", "detail": str(exc.errors())})
+
+
+@app.get("/")
+def health():
+    return {"status": "healthy", "captcha_model": _captcha_session is not None}
+
+
+# ------------------ HTTP HELPERS ------------------
+def is_login_failed(response: httpx.Response) -> bool:
+    url_str = str(response.url)
+    if "site%2Flogin" in url_str or "site/login" in url_str:
+        return True
+    if "LoginForm[username]" in response.text or "LoginForm[password]" in response.text:
+        return True
+    if "<h4" in response.text and "Login" in response.text:
+        return True
+    return False
+
+
+def extract_csrf(html: str) -> str:
+    m = re.search(r'name="csrf-token"\s+content="([^"]+)"', html)
+    if m:
+        return m.group(1)
+    m = re.search(r'<input[^>]+name="_csrf"[^>]+value="([^"]+)"', html)
+    if m:
+        return m.group(1)
+    m = re.search(r'<input[^>]+value="([^"]+)"[^>]+name="_csrf"', html)
+    if m:
+        return m.group(1)
+    return ""
+
+
+def collect_cookies(response: httpx.Response, base: dict) -> dict:
+    merged = dict(base)
+    for header_val in response.headers.get_list("set-cookie"):
+        part = header_val.split(";")[0].strip()
+        if "=" in part:
+            k, v = part.split("=", 1)
+            merged[k.strip()] = v.strip()
+    return merged
+
+
+async def _follow_redirects_collecting_cookies(
+    client: httpx.AsyncClient, method: str, url: str, step_cookies: dict, timeout: int = 30, **kwargs
+) -> tuple[httpx.Response, dict]:
+    current_url = url
+    current_cookies = dict(step_cookies)
+    resp = None
+    for _ in range(10):
+        if method == "POST":
+            resp = await client.post(current_url, cookies=current_cookies, follow_redirects=False, timeout=timeout, **kwargs)
+        else:
+            resp = await client.get(current_url, cookies=current_cookies, follow_redirects=False, timeout=timeout, **kwargs)
+        current_cookies = collect_cookies(resp, current_cookies)
+        if resp.status_code in (301, 302, 303, 307, 308):
+            location = resp.headers.get("location", "")
+            if not location:
+                break
+            if location.startswith("/"):
+                parsed = urlparse(current_url)
+                location = f"{parsed.scheme}://{parsed.netloc}{location}"
+            elif not location.startswith("http"):
+                location = BASE_URL + "/" + location
+            current_url = location
+            method = "GET"
+            kwargs = {}
+        else:
+            return resp, current_cookies
+    return resp, current_cookies
+
+
+# ------------------ AUTO LOGIN (captcha-solving) ------------------
+async def auto_login(client: httpx.AsyncClient, username: str, password: str, seed_cookies: dict) -> tuple[httpx.Response, dict]:
+    login_url = f"{BASE_URL}/index.php?r=site%2Flogin"
+    logger.info("[LOGIN] auto-login for user=%s", username)
+    headers = dict(DEFAULT_HEADERS)
+
+    # 1. cold handshake
+    res, cookies = await _follow_redirects_collecting_cookies(client, "GET", login_url, {}, headers=headers)
+    res.raise_for_status()
+    csrf = extract_csrf(res.text)
+    if not csrf:
+        raise Exception("CSRF token not found on login page.")
+
+    await asyncio.sleep(random.uniform(0.3, 0.7))
+
+    # 2. dummy post so the server emits a captcha bound to this session
+    dummy = {"_csrf": csrf, "LoginForm[username]": "", "LoginForm[password]": ""}
+    headers.update({"Origin": BASE_URL, "Referer": login_url})
+    res_post, cookies = await _follow_redirects_collecting_cookies(client, "POST", login_url, cookies, data=dummy, headers=headers)
+    res_post.raise_for_status()
+
+    captcha_match = re.search(r'src="([^"]*?r=site%2Fcaptcha[^"]*?)"', res_post.text)
+    if not captcha_match:
+        raise Exception("Captcha image URL not found.")
+
+    # 3. fetch captcha image
+    captcha_url = BASE_URL + captcha_match.group(1).replace("&amp;", "&")
+    headers["Accept"] = "image/avif,image/webp,image/*,*/*;q=0.8"
+    captcha_response, cookies = await _follow_redirects_collecting_cookies(client, "GET", captcha_url, cookies, headers=headers)
+    captcha_response.raise_for_status()
+
+    # 4. solve
+    captcha_text = solve_captcha(captcha_response.content)
+    logger.info("[LOGIN] captcha solved: %s", captcha_text)
+    if not captcha_text:
+        raise Exception("Captcha solver returned empty text.")
+
+    # 5. real login
+    payload = {
+        "_csrf": csrf,
+        "LoginForm[username]": username,
+        "LoginForm[password]": password,
+        "LoginForm[captcha]": captcha_text,
+        "LoginForm[rememberMe]": "0",
+        "LoginForm[qr_code]": "",
+    }
+    headers["Accept"] = DEFAULT_HEADERS["Accept"]
+    await asyncio.sleep(random.uniform(0.2, 0.5))
+    response, final_cookies = await _follow_redirects_collecting_cookies(client, "POST", login_url, cookies, data=payload, headers=headers)
+    response.raise_for_status()
+
+    for key in ("kl_erp_device_id", "SERVERID"):
+        if key not in final_cookies and key in seed_cookies:
+            final_cookies[key] = seed_cookies[key]
+    return response, final_cookies
+
+
+async def login_with_retries(client: httpx.AsyncClient, username: str, password: str, seed_cookies: dict, attempts: int = 3):
+    response, cookies = None, dict(seed_cookies)
+    for attempt in range(attempts):
+        if attempt > 0:
+            await asyncio.sleep(random.uniform(1.0, 2.0))
+        response, cookies = await auto_login(client, username, password, seed_cookies=cookies)
+        if not is_login_failed(response):
+            return response, cookies
+        logger.warning("[LOGIN] attempt %d rejected (bad captcha or creds), retrying", attempt + 1)
+    raise HTTPException(status_code=401, detail="Invalid ERP credentials or captcha failed repeatedly.")
+
+
+def build_cookie_jar(php_sess_id: str, csrf_cookie: str, device_id: str, server_id: str) -> dict:
+    return {
+        "_csrf": unquote(csrf_cookie) if csrf_cookie else "",
+        "PHPSESSID": php_sess_id,
+        "kl_erp_device_id": unquote(device_id) if device_id else "",
+        "SERVERID": server_id,
+    }
+
+
+def session_payload(cookie_jar: dict, old_php_sess_id: str, fallback_server: str, fallback_csrf: str):
+    updated = cookie_jar.get("PHPSESSID")
+    final_csrf = cookie_jar.get("_csrf", fallback_csrf)
+    return {
+        "session_refreshed": updated != old_php_sess_id,
+        "cookies": {
+            "PHPSESSID": updated,
+            "kl_erp_device_id": cookie_jar.get("kl_erp_device_id", ""),
+            "SERVERID": cookie_jar.get("SERVERID", fallback_server),
+            "_csrf_token": final_csrf,
+            "_csrf": final_csrf,
+        },
+    }
+
+
+def build_register_url(base_url: str, href: str) -> str | None:
+    try:
+        full_relative_path = href.split(base_url)[-1]
+        register_url_segment = full_relative_path.split("?r=")[-1]
+        r_param_end = register_url_segment.find("&")
+        if r_param_end != -1:
+            r_path = unquote(register_url_segment[:r_param_end])
+            params_raw = register_url_segment[r_param_end:]
+            return f"{base_url}/index.php?r={r_path}{params_raw}"
+        return f"{base_url}/index.php?r={unquote(register_url_segment)}"
+    except Exception:
+        return None
+
+
+def strip_tags(html: str) -> str:
+    return re.sub(r"<.*?>", "", html).strip()
+
+
+NET_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, httpx.NetworkError, httpx.TimeoutException)
+
+
+# ------------------ /login ------------------
+@app.post("/login")
+async def login(username: str = Form(...), password: str = Form(...)):
+    try:
+        async with httpx.AsyncClient(verify=False, limits=limits_pool, headers=DEFAULT_HEADERS, http2=True) as client:
+            login_response, cookies = await login_with_retries(client, username, password, seed_cookies={})
+            fresh_csrf = extract_csrf(login_response.text)
+            return {
+                "success": True,
+                "message": "Logged in.",
+                "cookies": {
+                    "PHPSESSID": cookies.get("PHPSESSID"),
+                    "kl_erp_device_id": cookies.get("kl_erp_device_id"),
+                    "SERVERID": cookies.get("SERVERID", "erp3"),
+                    "_csrf_token": fresh_csrf,
+                    "_csrf": fresh_csrf,
+                },
+            }
+    except HTTPException:
+        raise
+    except NET_ERRORS as e:
+        logger.error("[LOGIN] network error: %s", e)
+        raise HTTPException(status_code=503, detail="University ERP portal is down or unreachable. Try again later.")
+    except Exception as e:
+        logger.error("[LOGIN] crash: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal error during login.")
+
+
+# ------------------ /fetch-attendance ------------------
+@app.post("/fetch-attendance")
+async def fetch_attendance(
+    username: str = Form(...),
+    password: str = Form(...),
+    php_sess_id: str = Form(default=""),
+    csrf_cookie: str = Form(default=""),
+    device_id: str = Form(default=""),
+    server_id: str = Form(default="erp3"),
+    academic_year_code: str = Form(...),
+    semester_id: str = Form(...),
+):
+    start = time.time()
+    cookie_jar = build_cookie_jar(php_sess_id, csrf_cookie, device_id, server_id)
+    attendance_url = f"{BASE_URL}/index.php?r=studentattendance%2Fstudentdailyattendance%2Fcourselist"
+
+    def payload(csrf: str) -> dict:
+        return {"_csrf": csrf, "DynamicModel[academicyear]": academic_year_code, "DynamicModel[semesterid]": semester_id}
+
+    try:
+        async with httpx.AsyncClient(verify=False, limits=limits_pool, headers=DEFAULT_HEADERS, http2=True) as client:
+            if not php_sess_id or not csrf_cookie:
+                login_response, cookie_jar = await login_with_retries(client, username, password, seed_cookies={})
+                php_sess_id = cookie_jar.get("PHPSESSID", "")
+                page_csrf = extract_csrf(login_response.text)
+            else:
+                landing = f"{BASE_URL}/index.php?r=studentattendance%2Fstudentdailyattendance"
+                get_response, cookie_jar = await _follow_redirects_collecting_cookies(client, "GET", landing, cookie_jar, timeout=15)
+                if is_login_failed(get_response):
+                    login_response, cookie_jar = await login_with_retries(client, username, password, seed_cookies=cookie_jar)
+                    page_csrf = extract_csrf(login_response.text)
+                else:
+                    page_csrf = extract_csrf(get_response.text)
+
+            if not page_csrf:
+                raise HTTPException(status_code=500, detail="Could not extract CSRF token from attendance page.")
+
+            post_response, cookie_jar = await _follow_redirects_collecting_cookies(
+                client, "POST", attendance_url, cookie_jar, timeout=15, data=payload(page_csrf)
+            )
+            if is_login_failed(post_response):
+                login_response, cookie_jar = await login_with_retries(client, username, password, seed_cookies=cookie_jar)
+                page_csrf = extract_csrf(login_response.text)
+                post_response, cookie_jar = await _follow_redirects_collecting_cookies(
+                    client, "POST", attendance_url, cookie_jar, timeout=15, data=payload(page_csrf)
+                )
+            post_response.raise_for_status()
+            html = post_response.text
+
+        table_match = re.search(r"<table.*?>(.*?)</table>", html, re.DOTALL | re.IGNORECASE)
+        if not table_match:
+            raise ValueError("Attendance table not found.")
+        tbody_match = re.search(r"<tbody.*?>(.*?)</tbody>", table_match.group(1), re.DOTALL | re.IGNORECASE)
+        if not tbody_match:
+            return {"success": True, "attendance": [], **session_payload(cookie_jar, php_sess_id, server_id, page_csrf)}
+
+        rows = re.findall(r"<tr.*?>(.*?)</tr>", tbody_match.group(1), re.DOTALL | re.IGNORECASE)
+        attendance = []
+        for row in rows:
+            cells = re.findall(r"<td.*?>(.*?)</td>", row, re.DOTALL | re.IGNORECASE)
+            if not cells or len(cells) < 14:
+                continue
+            href_match = re.search(r'href=["\'](.*?)["\']', cells[13], re.IGNORECASE)
+            href = href_match.group(1).replace("&amp;", "&") if href_match else None
+            attendance.append({
+                "index": strip_tags(cells[0]),
+                "course_code": strip_tags(cells[1]),
+                "course_name": strip_tags(cells[2]),
+                "type": strip_tags(cells[3]),
+                "section": strip_tags(cells[4]),
+                "academic_year": strip_tags(cells[5]),
+                "semester": strip_tags(cells[6]),
+                "conducted": strip_tags(cells[8]),
+                "attended": strip_tags(cells[9]),
+                "absent": strip_tags(cells[10]),
+                "percentage": strip_tags(cells[12]),
+                "register_href": href,
+            })
+
+        logger.info("[ATTENDANCE] ok in %.2fs (%d rows)", time.time() - start, len(attendance))
+        return {"success": True, "attendance": attendance, **session_payload(cookie_jar, php_sess_id, server_id, page_csrf)}
+    except HTTPException:
+        raise
+    except NET_ERRORS as e:
+        raise HTTPException(status_code=503, detail="University ERP portal is down or unreachable. Try again later.")
+    except Exception as e:
+        logger.error("[ATTENDANCE] crash: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ------------------ /fetch-timetable ------------------
+@app.post("/fetch-timetable")
+async def fetch_timetable(
+    username: str = Form(...),
+    password: str = Form(...),
+    php_sess_id: str = Form(default=""),
+    csrf_cookie: str = Form(default=""),
+    device_id: str = Form(default=""),
+    server_id: str = Form(default="erp3"),
+    academic_year_code: str = Form(default="29"),
+    semester_id: str = Form(default="1"),
+):
+    start = time.time()
+    cookie_jar = build_cookie_jar(php_sess_id, csrf_cookie, device_id, server_id)
+    tt_url = (
+        f"{BASE_URL}/index.php?r=timetables%2Funiversitymasteracademictimetableview%2Findividualstudenttimetableget"
+        f"&UniversityMasterAcademicTimetableView%5Bacademicyear%5D={academic_year_code}"
+        f"&UniversityMasterAcademicTimetableView%5Bsemesterid%5D={semester_id}"
+    )
+    try:
+        async with httpx.AsyncClient(verify=False, limits=limits_pool, headers=DEFAULT_HEADERS, http2=True) as client:
+            if not php_sess_id or not csrf_cookie:
+                _, cookie_jar = await login_with_retries(client, username, password, seed_cookies={})
+                php_sess_id = cookie_jar.get("PHPSESSID", "")
+
+            response = await client.get(tt_url, cookies=cookie_jar, timeout=15)
+            if response.status_code in (301, 302, 303, 500) or is_login_failed(response):
+                _, cookie_jar = await login_with_retries(client, username, password, seed_cookies=cookie_jar)
+                response = await client.get(tt_url, cookies=cookie_jar, timeout=15)
+            response.raise_for_status()
+            html = response.text
+
+        table_match = re.search(r"<table.*?>(.*?)</table>", html, re.DOTALL | re.IGNORECASE)
+        if not table_match:
+            raise HTTPException(status_code=404, detail="Timetable grid not found.")
+        thead_match = re.search(r"<thead.*?>(.*?)</thead>", table_match.group(1), re.DOTALL | re.IGNORECASE)
+        if not thead_match:
+            raise HTTPException(status_code=500, detail="Timetable header not found.")
+        headers = [strip_tags(h) for h in re.findall(r"<th.*?>(.*?)</th>", thead_match.group(1), re.IGNORECASE)][1:]
+
+        tbody_match = re.search(r"<tbody.*?>(.*?)</tbody>", table_match.group(1), re.DOTALL | re.IGNORECASE)
+        if not tbody_match:
+            return {"success": True, "timetable": {}, **session_payload(cookie_jar, php_sess_id, server_id, unquote(csrf_cookie) if csrf_cookie else "")}
+
+        rows = re.findall(r"<tr.*?>(.*?)</tr>", tbody_match.group(1), re.DOTALL | re.IGNORECASE)
+        timetable = {}
+        for row in rows:
+            cells = re.findall(r"<td.*?>(.*?)</td>", row, re.DOTALL | re.IGNORECASE)
+            if not cells:
+                continue
+            day = strip_tags(cells[0])
+            timetable[day] = dict(zip(headers, [strip_tags(c) for c in cells[1:]]))
+
+        logger.info("[TIMETABLE] ok in %.2fs (%d days)", time.time() - start, len(timetable))
+        return {"success": True, "timetable": timetable, **session_payload(cookie_jar, php_sess_id, server_id, unquote(csrf_cookie) if csrf_cookie else "")}
+    except HTTPException:
+        raise
+    except NET_ERRORS:
+        raise HTTPException(status_code=503, detail="University ERP portal is down or unreachable. Try again later.")
+    except Exception as e:
+        logger.error("[TIMETABLE] crash: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ------------------ /fetch-register-detail ------------------
+@app.post("/fetch-register-detail")
+async def fetch_register_detail(
+    username: str = Form(...),
+    password: str = Form(...),
+    register_href: str = Form(...),
+    php_sess_id: str = Form(default=""),
+    csrf_cookie: str = Form(default=""),
+    device_id: str = Form(default=""),
+    server_id: str = Form(default="erp3"),
+):
+    register_url = build_register_url(BASE_URL, register_href)
+    if not register_url:
+        raise HTTPException(status_code=400, detail="Bad register link.")
+    cookie_jar = build_cookie_jar(php_sess_id, csrf_cookie, device_id, server_id)
+    try:
+        async with httpx.AsyncClient(verify=False, limits=limits_pool, headers=DEFAULT_HEADERS, http2=True) as client:
+            if not php_sess_id or not csrf_cookie:
+                login_response, cookie_jar = await login_with_retries(client, username, password, seed_cookies={})
+                php_sess_id = cookie_jar.get("PHPSESSID", "")
+                active_csrf = extract_csrf(login_response.text)
+            else:
+                active_csrf = unquote(csrf_cookie)
+
+            response = await client.get(f"{register_url}&_csrf={active_csrf}", cookies=cookie_jar, timeout=15)
+            if response.status_code in (301, 302, 303, 500) or is_login_failed(response):
+                login_response, cookie_jar = await login_with_retries(client, username, password, seed_cookies=cookie_jar)
+                active_csrf = extract_csrf(login_response.text) or cookie_jar.get("_csrf", "")
+                response = await client.get(f"{register_url}&_csrf={active_csrf}", cookies=cookie_jar, timeout=15)
+            response.raise_for_status()
+            html = response.text
+
+        table_match = re.search(
+            r'<table[^>]*class=["\']table table-striped table-bordered["\'][^>]*>(.*?)</table>',
+            html, re.DOTALL | re.IGNORECASE,
+        )
+        if not table_match:
+            return {"success": False, "message": "Register table not found."}
+        headers = [strip_tags(h) for h in re.findall(r"<th.*?>(.*?)</th>", table_match.group(1), re.IGNORECASE) if h.strip()]
+        META = 14
+        metadata_headers, daily_headers = headers[:META], headers[META:]
+        tbody_match = re.search(r"<tbody.*?>(.*?)</tbody>", table_match.group(1), re.DOTALL | re.IGNORECASE)
+        if not tbody_match:
+            return {"success": False, "message": "Register rows not found."}
+        cells = re.findall(r"<td.*?>(.*?)</td>", tbody_match.group(1), re.DOTALL | re.IGNORECASE)
+        if len(cells) < META:
+            return {"success": False, "message": "Register layout truncated."}
+        metadata = {h: strip_tags(cells[i]) for i, h in enumerate(metadata_headers) if i < len(cells)}
+        daily = [
+            {"date_slot": h, "status": strip_tags(cells[META + i])}
+            for i, h in enumerate(daily_headers)
+            if META + i < len(cells)
+        ]
+        return {"success": True, "metadata": metadata, "daily_attendance": daily,
+                **session_payload(cookie_jar, php_sess_id, server_id, active_csrf)}
+    except HTTPException:
+        raise
+    except NET_ERRORS:
+        raise HTTPException(status_code=503, detail="University ERP portal is down or unreachable. Try again later.")
+    except Exception as e:
+        logger.error("[REGISTER] crash: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ------------------ /fetch-cgpa ------------------
+@app.post("/fetch-cgpa")
+async def fetch_cgpa(
+    username: str = Form(...),
+    password: str = Form(...),
+    php_sess_id: str = Form(default=""),
+    csrf_cookie: str = Form(default=""),
+    device_id: str = Form(default=""),
+    server_id: str = Form(default="erp3"),
+):
+    cookie_jar = build_cookie_jar(php_sess_id, csrf_cookie, device_id, server_id)
+    cgpa_url = f"{BASE_URL}/index.php?r=studentinfo%2Fstudentendexamresult%2Fsearchgetmycgpa"
+    try:
+        async with httpx.AsyncClient(verify=False, limits=limits_pool, headers=DEFAULT_HEADERS, http2=True) as client:
+            if not php_sess_id or not csrf_cookie:
+                _, cookie_jar = await login_with_retries(client, username, password, seed_cookies={})
+                php_sess_id = cookie_jar.get("PHPSESSID", "")
+
+            response = await client.get(cgpa_url, cookies=cookie_jar, timeout=15)
+            if response.status_code in (301, 302, 303, 500) or is_login_failed(response):
+                _, cookie_jar = await login_with_retries(client, username, password, seed_cookies=cookie_jar)
+                response = await client.get(cgpa_url, cookies=cookie_jar, timeout=15)
+            response.raise_for_status()
+            html = response.text
+
+        table_match = re.search(r"<table.*?>(.*?)</table>", html, re.DOTALL | re.IGNORECASE)
+        if not table_match:
+            raise HTTPException(status_code=404, detail="Result grid not found.")
+        rows = re.findall(r"<tr.*?>(.*?)</tr>", table_match.group(1), re.DOTALL | re.IGNORECASE)
+        courses = []
+        for row in rows:
+            if "<th" in row.lower():
+                continue
+            cells = re.findall(r"<td.*?>(.*?)</td>", row, re.DOTALL | re.IGNORECASE)
+            if len(cells) < 11:
+                continue
+            link_match = re.search(r'href=["\']([^"\']+)["\']', row, re.IGNORECASE)
+            href = link_match.group(1).replace("&amp;", "&") if link_match else ""
+            courses.append({
+                "course_code": strip_tags(cells[3]),
+                "course_name": strip_tags(cells[4]),
+                "grade": strip_tags(cells[5]),
+                "grade_point": strip_tags(cells[6]),
+                "credits": strip_tags(cells[7]),
+                "promotion_status": strip_tags(cells[8]),
+                "academic_year": strip_tags(cells[9]),
+                "semester": strip_tags(cells[10]),
+                "target_href": href,
+            })
+        return {"success": True, "data": courses,
+                **session_payload(cookie_jar, php_sess_id, server_id, unquote(csrf_cookie) if csrf_cookie else "")}
+    except HTTPException:
+        raise
+    except NET_ERRORS:
+        raise HTTPException(status_code=503, detail="University ERP portal is down or unreachable. Try again later.")
+    except Exception as e:
+        logger.error("[CGPA] crash: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ------------------ /fetch-marks-detail ------------------
+@app.post("/fetch-marks-detail")
+async def fetch_marks_detail(
+    target_href: str = Form(...),
+    username: str = Form(...),
+    password: str = Form(...),
+    php_sess_id: str = Form(default=""),
+    csrf_cookie: str = Form(default=""),
+    device_id: str = Form(default=""),
+    server_id: str = Form(default="erp3"),
+):
+    cookie_jar = build_cookie_jar(php_sess_id, csrf_cookie, device_id, server_id)
+    url = target_href if target_href.startswith("http") else f"{BASE_URL}/{target_href.lstrip('/')}"
+    try:
+        async with httpx.AsyncClient(verify=False, limits=limits_pool, headers=DEFAULT_HEADERS, http2=True) as client:
+            response = await client.get(url, cookies=cookie_jar, timeout=15)
+            if response.status_code in (301, 302, 303, 500) or is_login_failed(response):
+                _, cookie_jar = await login_with_retries(client, username, password, seed_cookies=cookie_jar)
+                response = await client.get(url, cookies=cookie_jar, timeout=15)
+            response.raise_for_status()
+            html = response.text
+
+        table_match = re.search(r'<table id="w0".*?>(.*?)</table>', html, re.DOTALL | re.IGNORECASE)
+        if not table_match:
+            raise HTTPException(status_code=404, detail="Scorecard not found.")
+        rows = re.findall(r"<tr.*?>(.*?)</tr>", table_match.group(1), re.DOTALL | re.IGNORECASE)
+        scorecard = {}
+        for row in rows:
+            th = re.search(r"<th.*?>(.*?)</th>", row, re.DOTALL | re.IGNORECASE)
+            td = re.search(r"<td.*?>(.*?)</td>", row, re.DOTALL | re.IGNORECASE)
+            if th and td:
+                key = strip_tags(th.group(1)).lower().replace(" ", "_")
+                scorecard[key] = strip_tags(td.group(1))
+        if "course_desc" in scorecard and "course_name" not in scorecard:
+            scorecard["course_name"] = scorecard["course_desc"]
+        return {"success": True, "scorecard": scorecard,
+                **session_payload(cookie_jar, php_sess_id, server_id, unquote(csrf_cookie) if csrf_cookie else "")}
+    except HTTPException:
+        raise
+    except NET_ERRORS:
+        raise HTTPException(status_code=503, detail="University ERP portal is down or unreachable. Try again later.")
+    except Exception as e:
+        logger.error("[MARKS] crash: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ------------------ /fetch-seating-plan ------------------
+@app.post("/fetch-seating-plan")
+async def fetch_seating_plan(
+    username: str = Form(...),
+    password: str = Form(...),
+    php_sess_id: str = Form(default=""),
+    csrf_cookie: str = Form(default=""),
+    device_id: str = Form(default=""),
+    server_id: str = Form(default="erp3"),
+):
+    cookie_jar = build_cookie_jar(php_sess_id, csrf_cookie, device_id, server_id)
+    seating_url = f"{BASE_URL}/index.php?r=examsection%2Fexam-invigilator-student-room-allotment-info%2Fstud_my_seating_plan"
+    try:
+        async with httpx.AsyncClient(verify=False, limits=limits_pool, headers=DEFAULT_HEADERS, http2=True) as client:
+            if not php_sess_id or not csrf_cookie:
+                _, cookie_jar = await login_with_retries(client, username, password, seed_cookies={})
+                php_sess_id = cookie_jar.get("PHPSESSID", "")
+
+            response = await client.get(seating_url, cookies=cookie_jar, timeout=15)
+            if response.status_code in (301, 302, 303, 500) or is_login_failed(response):
+                _, cookie_jar = await login_with_retries(client, username, password, seed_cookies=cookie_jar)
+                response = await client.get(seating_url, cookies=cookie_jar, timeout=15)
+            response.raise_for_status()
+            html = response.text
+
+        table_match = re.search(r"<table.*?>(.*?)</table>", html, re.DOTALL | re.IGNORECASE)
+        if not table_match:
+            raise HTTPException(status_code=404, detail="Seating plan not found.")
+        tbody_match = re.search(r"<tbody.*?>(.*?)</tbody>", table_match.group(1), re.DOTALL | re.IGNORECASE)
+        if not tbody_match:
+            return {"success": True, "seating_plan": [], **session_payload(cookie_jar, php_sess_id, server_id, unquote(csrf_cookie) if csrf_cookie else "")}
+        rows = re.findall(r"<tr.*?>(.*?)</tr>", tbody_match.group(1), re.DOTALL | re.IGNORECASE)
+        seating = []
+        for row in rows:
+            cells = re.findall(r"<td.*?>(.*?)</td>", row, re.DOTALL | re.IGNORECASE)
+            if not cells or len(cells) < 8:
+                continue
+            seating.append({
+                "index": strip_tags(cells[0]),
+                "ref_id": strip_tags(cells[1]),
+                "date": strip_tags(cells[2]),
+                "exam_type": strip_tags(cells[3]),
+                "time_slot": strip_tags(cells[4]),
+                "university_id": strip_tags(cells[5]),
+                "course_code": strip_tags(cells[6]),
+                "room_no": strip_tags(cells[7]),
+            })
+        return {"success": True, "seating_plan": seating,
+                **session_payload(cookie_jar, php_sess_id, server_id, unquote(csrf_cookie) if csrf_cookie else "")}
+    except HTTPException:
+        raise
+    except NET_ERRORS:
+        raise HTTPException(status_code=503, detail="University ERP portal is down or unreachable. Try again later.")
+    except Exception as e:
+        logger.error("[SEATING] crash: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))

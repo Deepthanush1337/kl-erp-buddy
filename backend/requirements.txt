@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+httpx[http2]
+onnxruntime
+numpy
+pillow
+beautifulsoup4
+python-multipart

@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0f1115" />
+  <title>KL ERP Buddy</title>
+  <link rel="manifest" href="manifest.json" />
+  <link rel="icon" type="image/svg+xml" href="icon.svg" />
+  <link rel="apple-touch-icon" href="icon.svg" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+  <!-- ============ LOGIN SCREEN ============ -->
+  <div id="login-screen" class="screen">
+    <div class="login-card">
+      <div class="brand">
+        <img src="icon.svg" alt="KL ERP Buddy logo" class="brand-logo" />
+        <h1 class="brand-name">KL ERP Buddy</h1>
+        <p class="brand-tag">Timetable &middot; Attendance &middot; Grades &middot; Exams</p>
+      </div>
+      <form id="login-form" autocomplete="off">
+        <label class="field">
+          <span>Username</span>
+          <input type="text" id="login-username" placeholder="e.g. 24XXXXXX" required autocapitalize="none" />
+        </label>
+        <label class="field">
+          <span>Password</span>
+          <input type="password" id="login-password" placeholder="ERP password" required />
+        </label>
+        <button type="submit" id="login-btn" class="btn btn-primary btn-block">
+          <span class="btn-label">Sign in</span>
+          <span class="btn-spinner hidden"></span>
+        </button>
+        <p id="login-error" class="login-error hidden"></p>
+      </form>
+      <p class="login-note">Credentials are stored only on this device.</p>
+    </div>
+  </div>
+
+  <!-- ============ APP SCREEN ============ -->
+  <div id="app-screen" class="screen hidden">
+    <header class="app-header">
+      <div class="app-header-inner">
+        <div class="app-brand">
+          <img src="icon.svg" alt="" class="app-brand-logo" />
+          <span class="app-brand-name">KL ERP Buddy</span>
+        </div>
+        <nav class="main-nav" id="main-nav">
+          <button class="nav-btn active" data-tab="dashboard">
+            <svg viewBox="0 0 24 24"><path d="M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z"/></svg>
+            <span>Dashboard</span>
+          </button>
+          <button class="nav-btn" data-tab="timetable">
+            <svg viewBox="0 0 24 24"><path d="M19 4h-1V2h-2v2H8V2H6v2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2zm0 16H5V10h14v10zM5 8V6h14v2H5z"/></svg>
+            <span>Timetable</span>
+          </button>
+          <button class="nav-btn" data-tab="attendance">
+            <svg viewBox="0 0 24 24"><path d="M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+            <span>Attendance</span>
+          </button>
+          <button class="nav-btn" data-tab="grades">
+            <svg viewBox="0 0 24 24"><path d="M19 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2zM9 17H7v-7h2v7zm4 0h-2V7h2v10zm4 0h-2v-4h2v4z"/></svg>
+            <span>Grades</span>
+          </button>
+          <button class="nav-btn" data-tab="exams">
+            <svg viewBox="0 0 24 24"><path d="M18 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2zM6 4h5v8l-2.5-1.5L6 12V4z"/></svg>
+            <span>Exams</span>
+          </button>
+        </nav>
+        <button id="logout-btn" class="btn btn-ghost" title="Log out">
+          <svg viewBox="0 0 24 24"><path d="M17 7l-1.41 1.41L18.17 11H8v2h10.17l-2.58 2.58L17 17l5-5zM4 5h8V3H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h8v-2H4V5z"/></svg>
+          <span class="logout-label">Logout</span>
+        </button>
+      </div>
+    </header>
+
+    <main class="app-main">
+
+      <!-- ===== Dashboard ===== -->
+      <section id="tab-dashboard" class="tab-panel active">
+        <div class="tab-head">
+          <div>
+            <h2 id="dash-greeting">Hello</h2>
+            <p class="tab-sub" id="dash-date"></p>
+          </div>
+          <button class="btn btn-ghost refresh-btn" data-refresh="dashboard">
+            <svg viewBox="0 0 24 24"><path d="M17.65 6.35A8 8 0 1 0 19.73 14h-2.08a6 6 0 1 1-1.41-6.24L13 11h7V4z"/></svg>
+            Refresh
+          </button>
+        </div>
+        <div id="dashboard-content"></div>
+      </section>
+
+      <!-- ===== Timetable ===== -->
+      <section id="tab-timetable" class="tab-panel">
+        <div class="tab-head">
+          <div>
+            <h2>Timetable</h2>
+            <p class="tab-sub">Weekly class schedule</p>
+          </div>
+          <button class="btn btn-ghost refresh-btn" data-refresh="timetable">
+            <svg viewBox="0 0 24 24"><path d="M17.65 6.35A8 8 0 1 0 19.73 14h-2.08a6 6 0 1 1-1.41-6.24L13 11h7V4z"/></svg>
+            Refresh
+          </button>
+        </div>
+        <div class="selectors">
+          <label class="field field-inline">
+            <span>Academic year</span>
+            <select id="tt-year"></select>
+          </label>
+          <label class="field field-inline">
+            <span>Semester</span>
+            <select id="tt-semester">
+              <option value="1">Odd</option>
+              <option value="2">Even</option>
+              <option value="3">Summer</option>
+              <option value="4">Term 3</option>
+            </select>
+          </label>
+        </div>
+        <div id="timetable-content"></div>
+      </section>
+
+      <!-- ===== Attendance ===== -->
+      <section id="tab-attendance" class="tab-panel">
+        <div class="tab-head">
+          <div>
+            <h2>Attendance</h2>
+            <p class="tab-sub">Course-wise attendance</p>
+          </div>
+          <button class="btn btn-ghost refresh-btn" data-refresh="attendance">
+            <svg viewBox="0 0 24 24"><path d="M17.65 6.35A8 8 0 1 0 19.73 14h-2.08a6 6 0 1 1-1.41-6.24L13 11h7V4z"/></svg>
+            Refresh
+          </button>
+        </div>
+        <div class="selectors">
+          <label class="field field-inline">
+            <span>Academic year</span>
+            <select id="att-year"></select>
+          </label>
+          <label class="field field-inline">
+            <span>Semester</span>
+            <select id="att-semester">
+              <option value="1">Odd</option>
+              <option value="2">Even</option>
+              <option value="3">Summer</option>
+              <option value="4">Term 3</option>
+            </select>
+          </label>
+        </div>
+        <div id="attendance-summary"></div>
+        <div id="attendance-content"></div>
+      </section>
+
+      <!-- ===== Grades ===== -->
+      <section id="tab-grades" class="tab-panel">
+        <div class="tab-head">
+          <div>
+            <h2>Grades</h2>
+            <p class="tab-sub">Results &amp; scorecards</p>
+          </div>
+          <button class="btn btn-ghost refresh-btn" data-refresh="grades">
+            <svg viewBox="0 0 24 24"><path d="M17.65 6.35A8 8 0 1 0 19.73 14h-2.08a6 6 0 1 1-1.41-6.24L13 11h7V4z"/></svg>
+            Refresh
+          </button>
+        </div>
+        <div id="grades-summary"></div>
+        <div id="grades-content"></div>
+      </section>
+
+      <!-- ===== Exams ===== -->
+      <section id="tab-exams" class="tab-panel">
+        <div class="tab-head">
+          <div>
+            <h2>Exams</h2>
+            <p class="tab-sub">Seating plan</p>
+          </div>
+          <button class="btn btn-ghost refresh-btn" data-refresh="exams">
+            <svg viewBox="0 0 24 24"><path d="M17.65 6.35A8 8 0 1 0 19.73 14h-2.08a6 6 0 1 1-1.41-6.24L13 11h7V4z"/></svg>
+            Refresh
+          </button>
+        </div>
+        <div id="exams-content"></div>
+      </section>
+
+    </main>
+  </div>
+
+  <!-- ============ MODAL ============ -->
+  <div id="modal-overlay" class="modal-overlay hidden">
+    <div class="modal-card" role="dialog" aria-modal="true">
+      <div class="modal-head">
+        <h3 id="modal-title">Details</h3>
+        <button id="modal-close" class="btn btn-icon" aria-label="Close">
+          <svg viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </div>
+      <div id="modal-body" class="modal-body"></div>
+    </div>
+  </div>
+
+  <!-- ============ TOASTS ============ -->
+  <div id="toast-container" aria-live="polite"></div>
+
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
