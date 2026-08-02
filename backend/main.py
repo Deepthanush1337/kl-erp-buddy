@@ -62,7 +62,28 @@ def solve_captcha(image_bytes: bytes) -> str:
 
 
 # ------------------ CONSTANTS ------------------
-BASE_URL = "https://newerp.kluniversity.in"
+ERP_HOST = "newerp.kluniversity.in"
+BASE_URL = f"https://{ERP_HOST}"
+
+# Input whitelists (security: reject anything else with 422)
+RE_USERNAME = re.compile(r"^[0-9]{6,12}$")
+RE_ACADEMIC_YEAR = re.compile(r"^[0-9]{1,3}$")
+RE_SEMESTER = re.compile(r"^[0-9]{1,3}$")
+RE_SERVER_ID = re.compile(r"^erp[0-9]$")
+
+
+def _validate(pattern: re.Pattern, value: str, field: str) -> None:
+    if not pattern.fullmatch(value or ""):
+        raise HTTPException(status_code=422, detail=f"Invalid {field}.")
+
+
+def _is_erp_url(url: str) -> bool:
+    """SSRF guard: only allow requests whose final host is exactly the ERP host."""
+    try:
+        return urlparse(url).hostname == ERP_HOST
+    except Exception:
+        return False
+
 
 DEFAULT_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -91,6 +112,16 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @app.exception_handler(RequestValidationError)
@@ -268,8 +299,10 @@ def build_register_url(base_url: str, href: str) -> str | None:
         if r_param_end != -1:
             r_path = unquote(register_url_segment[:r_param_end])
             params_raw = register_url_segment[r_param_end:]
-            return f"{base_url}/index.php?r={r_path}{params_raw}"
-        return f"{base_url}/index.php?r={unquote(register_url_segment)}"
+            url = f"{base_url}/index.php?r={r_path}{params_raw}"
+        else:
+            url = f"{base_url}/index.php?r={unquote(register_url_segment)}"
+        return url if _is_erp_url(url) else None
     except Exception:
         return None
 
@@ -284,8 +317,9 @@ NET_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, httpx.NetworkError, http
 # ------------------ /login ------------------
 @app.post("/login")
 async def login(username: str = Form(...), password: str = Form(...)):
+    _validate(RE_USERNAME, username, "username")
     try:
-        async with httpx.AsyncClient(verify=False, limits=limits_pool, headers=DEFAULT_HEADERS, http2=True) as client:
+        async with httpx.AsyncClient(verify=True, limits=limits_pool, headers=DEFAULT_HEADERS, http2=True) as client:
             login_response, cookies = await login_with_retries(client, username, password, seed_cookies={})
             fresh_csrf = extract_csrf(login_response.text)
             return {
@@ -321,6 +355,10 @@ async def fetch_attendance(
     academic_year_code: str = Form(...),
     semester_id: str = Form(...),
 ):
+    _validate(RE_USERNAME, username, "username")
+    _validate(RE_SERVER_ID, server_id, "server_id")
+    _validate(RE_ACADEMIC_YEAR, academic_year_code, "academic_year_code")
+    _validate(RE_SEMESTER, semester_id, "semester_id")
     start = time.time()
     cookie_jar = build_cookie_jar(php_sess_id, csrf_cookie, device_id, server_id)
     attendance_url = f"{BASE_URL}/index.php?r=studentattendance%2Fstudentdailyattendance%2Fcourselist"
@@ -329,7 +367,7 @@ async def fetch_attendance(
         return {"_csrf": csrf, "DynamicModel[academicyear]": academic_year_code, "DynamicModel[semesterid]": semester_id}
 
     try:
-        async with httpx.AsyncClient(verify=False, limits=limits_pool, headers=DEFAULT_HEADERS, http2=True) as client:
+        async with httpx.AsyncClient(verify=True, limits=limits_pool, headers=DEFAULT_HEADERS, http2=True) as client:
             if not php_sess_id or not csrf_cookie:
                 login_response, cookie_jar = await login_with_retries(client, username, password, seed_cookies={})
                 php_sess_id = cookie_jar.get("PHPSESSID", "")
@@ -396,7 +434,7 @@ async def fetch_attendance(
         raise HTTPException(status_code=503, detail="University ERP portal is down or unreachable. Try again later.")
     except Exception as e:
         logger.error("[ATTENDANCE] crash: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error.")
 
 
 # ------------------ /fetch-timetable ------------------
@@ -411,6 +449,10 @@ async def fetch_timetable(
     academic_year_code: str = Form(default="29"),
     semester_id: str = Form(default="1"),
 ):
+    _validate(RE_USERNAME, username, "username")
+    _validate(RE_SERVER_ID, server_id, "server_id")
+    _validate(RE_ACADEMIC_YEAR, academic_year_code, "academic_year_code")
+    _validate(RE_SEMESTER, semester_id, "semester_id")
     start = time.time()
     cookie_jar = build_cookie_jar(php_sess_id, csrf_cookie, device_id, server_id)
     tt_url = (
@@ -419,7 +461,7 @@ async def fetch_timetable(
         f"&UniversityMasterAcademicTimetableView%5Bsemesterid%5D={semester_id}"
     )
     try:
-        async with httpx.AsyncClient(verify=False, limits=limits_pool, headers=DEFAULT_HEADERS, http2=True) as client:
+        async with httpx.AsyncClient(verify=True, limits=limits_pool, headers=DEFAULT_HEADERS, http2=True) as client:
             if not php_sess_id or not csrf_cookie:
                 _, cookie_jar = await login_with_retries(client, username, password, seed_cookies={})
                 php_sess_id = cookie_jar.get("PHPSESSID", "")
@@ -460,7 +502,7 @@ async def fetch_timetable(
         raise HTTPException(status_code=503, detail="University ERP portal is down or unreachable. Try again later.")
     except Exception as e:
         logger.error("[TIMETABLE] crash: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error.")
 
 
 # ------------------ /fetch-register-detail ------------------
@@ -474,12 +516,14 @@ async def fetch_register_detail(
     device_id: str = Form(default=""),
     server_id: str = Form(default="erp3"),
 ):
+    _validate(RE_USERNAME, username, "username")
+    _validate(RE_SERVER_ID, server_id, "server_id")
     register_url = build_register_url(BASE_URL, register_href)
     if not register_url:
         raise HTTPException(status_code=400, detail="Bad register link.")
     cookie_jar = build_cookie_jar(php_sess_id, csrf_cookie, device_id, server_id)
     try:
-        async with httpx.AsyncClient(verify=False, limits=limits_pool, headers=DEFAULT_HEADERS, http2=True) as client:
+        async with httpx.AsyncClient(verify=True, limits=limits_pool, headers=DEFAULT_HEADERS, http2=True) as client:
             if not php_sess_id or not csrf_cookie:
                 login_response, cookie_jar = await login_with_retries(client, username, password, seed_cookies={})
                 php_sess_id = cookie_jar.get("PHPSESSID", "")
@@ -524,7 +568,7 @@ async def fetch_register_detail(
         raise HTTPException(status_code=503, detail="University ERP portal is down or unreachable. Try again later.")
     except Exception as e:
         logger.error("[REGISTER] crash: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error.")
 
 
 # ------------------ /fetch-cgpa ------------------
@@ -537,10 +581,12 @@ async def fetch_cgpa(
     device_id: str = Form(default=""),
     server_id: str = Form(default="erp3"),
 ):
+    _validate(RE_USERNAME, username, "username")
+    _validate(RE_SERVER_ID, server_id, "server_id")
     cookie_jar = build_cookie_jar(php_sess_id, csrf_cookie, device_id, server_id)
     cgpa_url = f"{BASE_URL}/index.php?r=studentinfo%2Fstudentendexamresult%2Fsearchgetmycgpa"
     try:
-        async with httpx.AsyncClient(verify=False, limits=limits_pool, headers=DEFAULT_HEADERS, http2=True) as client:
+        async with httpx.AsyncClient(verify=True, limits=limits_pool, headers=DEFAULT_HEADERS, http2=True) as client:
             if not php_sess_id or not csrf_cookie:
                 _, cookie_jar = await login_with_retries(client, username, password, seed_cookies={})
                 php_sess_id = cookie_jar.get("PHPSESSID", "")
@@ -584,7 +630,7 @@ async def fetch_cgpa(
         raise HTTPException(status_code=503, detail="University ERP portal is down or unreachable. Try again later.")
     except Exception as e:
         logger.error("[CGPA] crash: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error.")
 
 
 # ------------------ /fetch-marks-detail ------------------
@@ -598,10 +644,14 @@ async def fetch_marks_detail(
     device_id: str = Form(default=""),
     server_id: str = Form(default="erp3"),
 ):
+    _validate(RE_USERNAME, username, "username")
+    _validate(RE_SERVER_ID, server_id, "server_id")
     cookie_jar = build_cookie_jar(php_sess_id, csrf_cookie, device_id, server_id)
     url = target_href if target_href.startswith("http") else f"{BASE_URL}/{target_href.lstrip('/')}"
+    if not _is_erp_url(url):
+        raise HTTPException(status_code=400, detail="Bad target link.")
     try:
-        async with httpx.AsyncClient(verify=False, limits=limits_pool, headers=DEFAULT_HEADERS, http2=True) as client:
+        async with httpx.AsyncClient(verify=True, limits=limits_pool, headers=DEFAULT_HEADERS, http2=True) as client:
             response = await client.get(url, cookies=cookie_jar, timeout=15)
             if response.status_code in (301, 302, 303, 500) or is_login_failed(response):
                 _, cookie_jar = await login_with_retries(client, username, password, seed_cookies=cookie_jar)
@@ -630,7 +680,7 @@ async def fetch_marks_detail(
         raise HTTPException(status_code=503, detail="University ERP portal is down or unreachable. Try again later.")
     except Exception as e:
         logger.error("[MARKS] crash: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error.")
 
 
 # ------------------ /fetch-seating-plan ------------------
@@ -643,10 +693,12 @@ async def fetch_seating_plan(
     device_id: str = Form(default=""),
     server_id: str = Form(default="erp3"),
 ):
+    _validate(RE_USERNAME, username, "username")
+    _validate(RE_SERVER_ID, server_id, "server_id")
     cookie_jar = build_cookie_jar(php_sess_id, csrf_cookie, device_id, server_id)
     seating_url = f"{BASE_URL}/index.php?r=examsection%2Fexam-invigilator-student-room-allotment-info%2Fstud_my_seating_plan"
     try:
-        async with httpx.AsyncClient(verify=False, limits=limits_pool, headers=DEFAULT_HEADERS, http2=True) as client:
+        async with httpx.AsyncClient(verify=True, limits=limits_pool, headers=DEFAULT_HEADERS, http2=True) as client:
             if not php_sess_id or not csrf_cookie:
                 _, cookie_jar = await login_with_retries(client, username, password, seed_cookies={})
                 php_sess_id = cookie_jar.get("PHPSESSID", "")
@@ -688,4 +740,4 @@ async def fetch_seating_plan(
         raise HTTPException(status_code=503, detail="University ERP portal is down or unreachable. Try again later.")
     except Exception as e:
         logger.error("[SEATING] crash: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error.")

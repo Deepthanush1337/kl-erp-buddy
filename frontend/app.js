@@ -138,7 +138,7 @@ function buildYearOptions(sel) {
   let html = "";
   for (let y = curStart - 3; y <= curStart; y++) {
     const label = `${y}-${String((y + 1) % 100).padStart(2, "0")}`;
-    html += `<option value="${label}"${y === curStart ? " selected" : ""}>${label}</option>`;
+    html += `<option value="${esc(label)}"${y === curStart ? " selected" : ""}>${esc(label)}</option>`;
   }
   sel.innerHTML = html;
 }
@@ -236,7 +236,7 @@ function skelCards(n) {
   return Array.from({ length: n }, () => `<div class="skeleton skel-card"></div>`).join("");
 }
 function emptyState(title, sub, icon = "📭") {
-  return `<div class="empty-state"><div class="empty-icon">${icon}</div>
+  return `<div class="empty-state"><div class="empty-icon">${esc(icon)}</div>
     <div class="empty-title">${esc(title)}</div><div class="empty-sub">${esc(sub)}</div></div>`;
 }
 
