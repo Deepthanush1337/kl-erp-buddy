@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-  <meta name="theme-color" content="#0f1115" />
+  <meta name="theme-color" content="#0a0a0a" />
   <meta name="description" content="Timetable, attendance, grades and exam seating for KL University ERP." />
   <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
@@ -15,13 +15,13 @@
   <link rel="apple-touch-icon" href="icon.svg" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=IBM+Plex+Mono:wght@500;600;700&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
 
   <noscript>
-    <p style="max-width:420px;margin:80px auto;padding:16px;text-align:center;font-family:sans-serif;color:#e8eaf0;background:#1a1d24;border:1px solid #2a2e38;border-radius:12px">
+    <p style="max-width:420px;margin:80px auto;padding:16px;text-align:center;font-family:sans-serif;color:#f4f4f5;background:#101013;border:1px solid #26262d;border-radius:2px">
       KL ERP Buddy needs JavaScript to sign in to the ERP and show your timetable, attendance and grades. Please enable JavaScript and reload.
     </p>
   </noscript>
@@ -31,7 +31,8 @@
     <div class="login-card">
       <div class="brand">
         <img src="icon.svg" alt="KL ERP logo" class="brand-logo" />
-        <h1 class="brand-name">KL ERP</h1>
+        <h1 class="brand-name">KL ERP<span class="pdot">.</span></h1>
+        <p class="brand-tag">Timetable · Attendance · Grades</p>
       </div>
       <form id="login-form">
         <label class="field">
@@ -60,7 +61,7 @@
       <div class="app-header-inner">
         <div class="app-brand">
           <img src="icon.svg" alt="" class="app-brand-logo" />
-          <span class="app-brand-name">KL ERP Buddy</span>
+          <span class="app-brand-name">KL ERP<span class="pdot">.</span></span>
         </div>
         <nav class="main-nav" id="main-nav">
           <button class="nav-btn active" data-tab="dashboard">
@@ -96,10 +97,11 @@
       <!-- ===== Dashboard ===== -->
       <section id="tab-dashboard" class="tab-panel active">
         <div class="tab-head">
-          <div>
-            <h2 id="dash-greeting">Hello</h2>
+          <div class="tab-headings">
+            <p class="eyebrow" id="dash-date"></p>
+            <h2 class="page-title">your day<span class="pdot">.</span></h2>
+            <p class="dash-hello" id="dash-greeting">Hello</p>
             <p class="tab-sub hidden" id="dash-profile"></p>
-            <p class="tab-sub" id="dash-date"></p>
           </div>
           <button class="btn btn-ghost refresh-btn" data-refresh="dashboard">
             <i data-lucide="refresh-cw"></i>
@@ -112,8 +114,9 @@
       <!-- ===== Timetable ===== -->
       <section id="tab-timetable" class="tab-panel">
         <div class="tab-head">
-          <div>
-            <h2>Timetable</h2>
+          <div class="tab-headings">
+            <p class="eyebrow">Full schedule</p>
+            <h2 class="page-title">the week<span class="pdot">.</span></h2>
             <p class="tab-sub">Weekly class schedule</p>
           </div>
           <button class="btn btn-ghost refresh-btn" data-refresh="timetable">
@@ -142,8 +145,9 @@
       <!-- ===== Attendance ===== -->
       <section id="tab-attendance" class="tab-panel">
         <div class="tab-head">
-          <div>
-            <h2>Attendance</h2>
+          <div class="tab-headings">
+            <p class="eyebrow">Your numbers</p>
+            <h2 class="page-title">attendance<span class="pdot">.</span></h2>
             <p class="tab-sub">Course-wise attendance</p>
           </div>
           <button class="btn btn-ghost refresh-btn" data-refresh="attendance">
@@ -173,8 +177,9 @@
       <!-- ===== Grades ===== -->
       <section id="tab-grades" class="tab-panel">
         <div class="tab-head">
-          <div>
-            <h2>Grades</h2>
+          <div class="tab-headings">
+            <p class="eyebrow">Your report</p>
+            <h2 class="page-title">grades<span class="pdot">.</span></h2>
             <p class="tab-sub">Results &amp; scorecards</p>
           </div>
           <button class="btn btn-ghost refresh-btn" data-refresh="grades">
@@ -189,8 +194,9 @@
       <!-- ===== Exams ===== -->
       <section id="tab-exams" class="tab-panel">
         <div class="tab-head">
-          <div>
-            <h2>Exams</h2>
+          <div class="tab-headings">
+            <p class="eyebrow">Exam seating</p>
+            <h2 class="page-title">exams<span class="pdot">.</span></h2>
             <p class="tab-sub">Seating plan</p>
           </div>
           <button class="btn btn-ghost refresh-btn" data-refresh="exams">

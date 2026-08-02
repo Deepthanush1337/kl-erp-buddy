@@ -19,6 +19,7 @@ const state = {
   seating: null,        // array
   ttKey: null,          // "yearCode-semId" of loaded timetable
   attKey: null,
+  ttDay: null,          // selected day pill in the week view (defaults to today)
   activeTab: "dashboard",
 };
 
@@ -115,13 +116,18 @@ function clearSession() {
 // login and the detail endpoints always hit the real backend.
 const MOCK_MODE = new URLSearchParams(location.search).has("mock");
 
+// One row per course COMPONENT (type = L/T/P/S), matching the real API shape;
+// multiple rows share a course_code + course_name and get grouped in the UI.
 const MOCK_ATTENDANCE = [
-  { course_name: "Data Structures and Algorithms", course_code: "24CS2101", type: "Theory", section: "S-35", conducted: 42, attended: 39, absent: 3, percentage: "92.86", register_href: "mock" },
-  { course_name: "Operating Systems", course_code: "24CS3102", type: "Theory", section: "S-35", conducted: 40, attended: 35, absent: 5, percentage: "87.50", register_href: "mock" },
-  { course_name: "Database Management Systems", course_code: "24CS2103", type: "Theory", section: "S-36", conducted: 38, attended: 30, absent: 8, percentage: "78.95", register_href: "mock" },
-  { course_name: "Computer Networks", course_code: "24CS3104", type: "Theory", section: "S-35", conducted: 36, attended: 24, absent: 12, percentage: "66.67", register_href: "mock" },
-  { course_name: "Operating Systems Laboratory", course_code: "24CS3181", type: "Practical", section: "S-35", conducted: 20, attended: 19, absent: 1, percentage: "95.00", register_href: "mock" },
-  { course_name: "Professional Communication Skills", course_code: "24HS1101", type: "Theory", section: "S-37", conducted: 30, attended: 26, absent: 4, percentage: "86.67", register_href: "mock" },
+  { course_name: "Data Structures and Algorithms", course_code: "24CS2101", type: "L", section: "S-35", conducted: 30, attended: 28, absent: 2, percentage: "93.33", register_href: "mock" },
+  { course_name: "Data Structures and Algorithms", course_code: "24CS2101", type: "P", section: "S-35", conducted: 12, attended: 11, absent: 1, percentage: "91.67", register_href: "mock" },
+  { course_name: "Operating Systems", course_code: "24CS3102", type: "L", section: "S-35", conducted: 28, attended: 24, absent: 4, percentage: "85.71", register_href: "mock" },
+  { course_name: "Operating Systems", course_code: "24CS3102", type: "T", section: "S-35", conducted: 12, attended: 11, absent: 1, percentage: "91.67", register_href: "mock" },
+  { course_name: "Database Management Systems", course_code: "24CS2103", type: "L", section: "S-36", conducted: 26, attended: 21, absent: 5, percentage: "80.77", register_href: "mock" },
+  { course_name: "Computer Networks", course_code: "24CS3104", type: "L", section: "S-35", conducted: 24, attended: 15, absent: 9, percentage: "62.50", register_href: "mock" },
+  { course_name: "Computer Networks", course_code: "24CS3104", type: "P", section: "S-35", conducted: 12, attended: 9, absent: 3, percentage: "75.00", register_href: "mock" },
+  { course_name: "Computer Networks", course_code: "24CS3104", type: "S", section: "S-35-B", conducted: 8, attended: 2, absent: 6, percentage: "25.00", register_href: "mock" },
+  { course_name: "Professional Communication Skills", course_code: "24HS1101", type: "L", section: "S-37", conducted: 30, attended: 26, absent: 4, percentage: "86.67", register_href: "mock" },
 ];
 
 const MOCK_GRADES = [
@@ -139,10 +145,37 @@ const MOCK_SEATING = [
   { date: "18-08-2026", course_code: "24CS2103", university_id: "2600031735", exam_type: "Quiz", time_slot: "09:00 - 10:00", room_no: "C305" },
 ];
 
+// Day keys -> slot number -> raw ERP cell text. Identical text in consecutive
+// slots exercises the merged-block logic (e.g. Mon slots 3-4 become one block).
+const MOCK_TIMETABLE = {
+  Mon: { 3: "24CS2101-L - S-35 -RoomNo-C618", 4: "24CS2101-L - S-35 -RoomNo-C618", 5: "24CS3102-L - S-35 -RoomNo-R209C", 7: "24CS3102-L - S-35 -RoomNo-R209C", 8: "24CS3181-P - S-35 -RoomNo-L615", 9: "24CS3181-P - S-35 -RoomNo-L615", 10: "24HS1101-L - S-35 -RoomNo-R404A", 11: "24HS1101-L - S-35 -RoomNo-R404A" },
+  Tue: { 1: "24CS2103-L - S-36 -RoomNo-C505", 2: "24CS2103-L - S-36 -RoomNo-C505", 9: "24CS3104-L - S-35 -RoomNo-R310" },
+  Wed: { 3: "24CS3104-L - S-35 -RoomNo-R310", 4: "24CS3104-L - S-35 -RoomNo-R310", 6: "24CS2101-L - S-35 -RoomNo-C618" },
+  Thu: { 5: "24HS1101-L - S-35 -RoomNo-R404A", 7: "24CS2103-L - S-36 -RoomNo-C505", 8: "24CS2103-L - S-36 -RoomNo-C505" },
+  Fri: { 3: "24CS3102-L - S-35 -RoomNo-R209C", 10: "24CS3181-P - S-35 -RoomNo-L615", 11: "24CS3181-P - S-35 -RoomNo-L615" },
+  Sat: {},
+  Sun: {},
+};
+
 function mockApiResponse(path) {
   if (path === "/fetch-attendance") return { success: true, attendance: MOCK_ATTENDANCE };
   if (path === "/fetch-cgpa") return { success: true, data: MOCK_GRADES };
   if (path === "/fetch-seating-plan") return { success: true, seating_plan: MOCK_SEATING };
+  if (path === "/fetch-timetable") return { success: true, timetable: MOCK_TIMETABLE };
+  if (path === "/fetch-register-detail") {
+    return {
+      success: true,
+      metadata: { "Course": "Mock course", "Faculty": "Dr. Mock", "Section": "S-35" },
+      daily_attendance: [
+        { date_slot: "28-07-2026 (Slot 3)", status: "P" },
+        { date_slot: "30-07-2026 (Slot 5)", status: "P" },
+        { date_slot: "01-08-2026 (Slot 3)", status: "A" },
+      ],
+    };
+  }
+  if (path === "/fetch-marks-detail") {
+    return { success: true, scorecard: { "Mid Sem": "28/30", "Quiz": "09/10", "End Sem": "55/70", "Total": "92/110", "Grade": "S" } };
+  }
   return null; // everything else goes to the real backend
 }
 
@@ -265,15 +298,6 @@ function todayKey() {
   return DAY_KEYS[(new Date().getDay() + 6) % 7];
 }
 
-// Slot happening right now per SLOT_TIMES (device clock), or null during breaks/off-hours.
-function currentSlot() {
-  const mins = nowMinutes();
-  for (const n of SLOT_NUMBERS) {
-    if (mins >= timeToMin(SLOT_TIMES[n][0]) && mins < timeToMin(SLOT_TIMES[n][1])) return n;
-  }
-  return null;
-}
-
 /* ---------- Turnstile (Cloudflare human verification) ---------- */
 // The widget div lives on the login screen; the site key is injected here so it
 // only ever lives in config.js. api.js is async: if it finished loading before
@@ -309,9 +333,11 @@ function showApp() {
   $("#login-screen").classList.add("hidden");
   $("#app-screen").classList.remove("hidden");
   renderGreeting();
-  $("#dash-date").textContent = new Date().toLocaleDateString(undefined, {
-    weekday: "long", day: "numeric", month: "long", year: "numeric",
-  });
+  // Eyebrow line: "TODAY · SUN, AUG 2" (CSS uppercases it)
+  const now = new Date();
+  const wd = now.toLocaleDateString(undefined, { weekday: "short" });
+  const mon = now.toLocaleDateString(undefined, { month: "short" });
+  $("#dash-date").textContent = `TODAY · ${wd}, ${mon} ${now.getDate()}`;
   ensureProfile();
   switchTab("dashboard");
   loadDashboard();
@@ -595,10 +621,10 @@ function pctClass(pct) {
   return "pct-bad";
 }
 
-// Today's classes as merged blocks: consecutive slots with identical raw text
+// One day's classes as merged blocks: consecutive slots with identical raw text
 // collapse into one block with a real time range (07:10 – 08:50 etc.).
-function todaysBlocks() {
-  const day = state.timetable ? state.timetable[todayKey()] : null;
+function blocksForDay(dayKey) {
+  const day = state.timetable ? state.timetable[dayKey] : null;
   if (!day) return [];
   const out = [];
   let i = 0;
@@ -624,6 +650,29 @@ function todaysBlocks() {
   return out;
 }
 
+function todaysBlocks() { return blocksForDay(todayKey()); }
+
+function slotLabel(b) {
+  return b.startSlot === b.endSlot ? `Slot ${b.startSlot}` : `Slot ${b.startSlot}–${b.endSlot}`;
+}
+
+// Shared row markup (dashboard "today" list + week day view): big lime start
+// time + dim end + slot label on the left, class details on the right.
+function classRowHTML(b, isNow) {
+  return `<div class="class-row${isNow ? " now" : ""}">
+    <div class="cr-time">
+      <span class="cr-start">${b.start}</span>
+      <span class="cr-end">${b.end}</span>
+      <span class="cr-slot">${slotLabel(b)}</span>
+    </div>
+    <div class="cr-info">
+      <span class="cr-code">${esc(b.code)}</span>
+      <span class="cr-meta">${esc(b.section)}${b.room ? " · Room " + esc(b.room) : ""}</span>
+    </div>
+    ${isNow ? `<span class="cr-now">Now</span>` : ""}
+  </div>`;
+}
+
 function fmtDuration(mins) {
   const h = Math.floor(mins / 60), m = mins % 60;
   if (h > 0 && m > 0) return `${h}h ${m}m`;
@@ -631,10 +680,9 @@ function fmtDuration(mins) {
   return `${m}m`;
 }
 
-// Hero banner: current class (pulsing) / next class (with countdown) / all done.
-// Returns "" when there are no classes at all today (the empty state covers that).
+// Hero banner: current class (pulsing) / next class (with countdown) / all done
+// for the day / nothing scheduled at all.
 function classHero(blocks) {
-  if (blocks.length === 0) return "";
   const mins = nowMinutes();
   for (const b of blocks) {
     const s = timeToMin(b.start), e = timeToMin(b.end);
@@ -642,24 +690,36 @@ function classHero(blocks) {
       return `<div class="dash-hero now">
         <span class="hero-dot" aria-hidden="true"></span>
         <div class="hero-text">
-          <span class="hero-title">In class now: <b>${esc(b.code)}</b></span>
-          <span class="hero-sub">${esc(b.section)}${b.room ? " · " + esc(b.room) : ""} · ends ${b.end}</span>
+          <span class="hero-eyebrow">In class now · ends ${b.end}</span>
+          <span class="hero-title">${esc(b.code)}</span>
+          <span class="hero-sub">${esc(b.section)}${b.room ? " · Room " + esc(b.room) : ""} · ${slotLabel(b)}</span>
         </div></div>`;
     }
     if (mins < s) {
       return `<div class="dash-hero next">
         <i data-lucide="clock"></i>
         <div class="hero-text">
-          <span class="hero-title">Next up: <b>${esc(b.code)}</b> at ${b.start}</span>
-          <span class="hero-sub">${b.room ? esc(b.room) + " " : ""}(in ${fmtDuration(s - mins)})</span>
+          <span class="hero-eyebrow">Up next · in ${fmtDuration(s - mins)}</span>
+          <span class="hero-title">${esc(b.code)} <span class="hero-at">${b.start}</span></span>
+          <span class="hero-sub">${esc(b.section)}${b.room ? " · Room " + esc(b.room) : ""} · ${slotLabel(b)}</span>
         </div></div>`;
     }
   }
-  return `<div class="dash-hero done">
-    <i data-lucide="circle-check-big"></i>
+  if (blocks.length > 0) {
+    return `<div class="dash-hero done">
+      <i data-lucide="circle-check-big"></i>
+      <div class="hero-text">
+        <span class="hero-eyebrow">All done</span>
+        <span class="hero-title">no more classes today.</span>
+        <span class="hero-sub">All ${blocks.length} class${blocks.length === 1 ? "" : "es"} done — enjoy the rest of your day</span>
+      </div></div>`;
+  }
+  return `<div class="dash-hero idle">
+    <i data-lucide="coffee"></i>
     <div class="hero-text">
-      <span class="hero-title">No more classes today</span>
-      <span class="hero-sub">All ${blocks.length} class${blocks.length === 1 ? "" : "es"} done — enjoy the rest of your day</span>
+      <span class="hero-eyebrow">Nothing right now</span>
+      <span class="hero-title">no ongoing class. enjoy the break.</span>
+      <span class="hero-sub">No classes scheduled for today</span>
     </div></div>`;
 }
 
@@ -669,7 +729,7 @@ function renderDashboard() {
   if (state.attendance === null) { setHTML(box, skelCards(3)); return; }
   const pct = weightedAttendance(state.attendance);
   const blocks = todaysBlocks();
-  const courseCount = (state.attendance || []).length;
+  const courseCount = new Set((state.attendance || []).map((r) => `${r.course_code}@@${r.course_name}`)).size;
   const cls = pctClass(pct);
   const mins = nowMinutes();
 
@@ -702,35 +762,16 @@ function renderDashboard() {
         <div class="stat-hint">${esc($("#tt-semester option:checked").textContent)} semester</div>
       </div>
     </div>
-    <h3 class="section-title">Today's classes</h3>
-    ${blocks.length === 0
-      ? emptyState("No classes today", "Your schedule is clear — or the timetable isn't published yet.", "calendar-check")
-      : `<div class="card today-list">${blocks.map((b) => {
-          const isNow = mins >= timeToMin(b.start) && mins < timeToMin(b.end);
-          return `<div class="today-row${isNow ? " now" : ""}">
-            <span class="today-time">${b.start} – ${b.end}</span>
-            <span class="today-code">${esc(b.code)}</span>
-            <span class="today-meta">${esc(b.section)}${b.room ? " · " + esc(b.room) : ""}</span>
-          </div>`;
-        }).join("")}
-        </div>`}
+    ${blocks.length === 0 ? "" : `<h3 class="section-title">Today's classes</h3>
+    <div class="class-rows">${blocks.map((b) =>
+      classRowHTML(b, mins >= timeToMin(b.start) && mins < timeToMin(b.end))
+    ).join("")}</div>`}
   `);
 }
 
 /* ---------- Render: Timetable ---------- */
-// Columns actually present in the fetched data, intersected with the 11 real
-// KL slots and sorted numerically (robust if the ERP omits trailing empties).
-function timetableColumns(tt) {
-  const present = new Set();
-  for (const day of DAY_KEYS) {
-    for (const k of Object.keys(tt[day] || {})) {
-      const n = Number(k);
-      if (SLOT_TIMES[n]) present.add(n);
-    }
-  }
-  return [...present].sort((a, b) => a - b);
-}
-
+// Day-tab view: MON..SUN pills (active = lime, a tiny dot marks today) with the
+// merged-block class rows for the selected day below. Defaults to today.
 function renderTimetable() {
   const box = $("#timetable-content");
   const tt = state.timetable || {};
@@ -739,86 +780,54 @@ function renderTimetable() {
     setHTML(box, emptyState("No timetable data", "Nothing published for this term yet.", "calendar-days"));
     return;
   }
-  const cols = timetableColumns(tt);
-  if (cols.length === 0) {
-    setHTML(box, emptyState("No timetable data", "Nothing published for this term yet.", "calendar-days"));
-    return;
-  }
   const today = todayKey();
-  const nowSlot = currentSlot();
+  const sel = DAY_KEYS.includes(state.ttDay) ? state.ttDay : today;
+  state.ttDay = sel;
+  const isToday = sel === today;
+  const mins = nowMinutes();
 
-  let html = `<div class="tt-wrap"><table class="tt-table"><thead><tr><th>Day</th>`;
-  for (const n of cols) {
-    html += `<th><span class="tt-slot-num">${n}</span><span class="tt-slot-time">${SLOT_TIMES[n][0]}</span></th>`;
-  }
-  html += `</tr></thead><tbody>`;
+  let html = `<div class="day-pills" role="tablist" aria-label="Day of week">` +
+    DAY_KEYS.map((d) =>
+      `<button type="button" role="tab" aria-selected="${d === sel}"
+        class="day-pill${d === sel ? " active" : ""}${d === today ? " today" : ""}"
+        data-tt-day="${d}">${d}</button>`
+    ).join("") + `</div>`;
 
-  for (const day of DAY_KEYS) {
-    const slots = tt[day] || {};
-    const isToday = day === today;
-    html += `<tr${isToday ? ' class="tt-today-row"' : ""}><td class="tt-day${isToday ? " today" : ""}">${day}</td>`;
-    // Merge consecutive identical cells (raw text compare) into one colspan.
-    let i = 0;
-    while (i < cols.length) {
-      const startSlot = cols[i];
-      const txt = slots[String(startSlot)] || "-";
-      let span = 1;
-      while (
-        i + span < cols.length &&
-        cols[i + span] === cols[i + span - 1] + 1 && // only merge truly adjacent slots
-        (slots[String(cols[i + span])] || "-") === txt
-      ) span++;
-      const endSlot = cols[i + span - 1];
-      const spanLabel = `${SLOT_TIMES[startSlot][0]} – ${SLOT_TIMES[endSlot][1]}`;
-      const isNow = isToday && nowSlot != null && nowSlot >= startSlot && nowSlot <= endSlot;
-      if (txt === "-") {
-        html += `<td colspan="${span}"><span class="tt-cell-free${isNow ? " now" : ""}">Free</span></td>`;
-      } else {
-        const p = parseSlot(txt);
-        html += `<td colspan="${span}"><div class="tt-cell-class${isNow ? " now" : ""}">
-          <span class="tt-code">${esc(p.code)}</span>
-          <span class="tt-meta">${esc(p.section)}${p.room ? " · " + esc(p.room) : ""}</span>
-          <span class="tt-time">${spanLabel}</span>
-        </div></td>`;
-      }
-      i += span;
-    }
-    html += `</tr>`;
+  const blocks = blocksForDay(sel);
+  if (blocks.length === 0) {
+    html += `<div class="day-empty">
+      <div class="empty-title">no classes${sel === "Sun" ? " — happy sunday." : "."}</div>
+      <div class="empty-sub">Nothing scheduled for ${sel}. Pick another day above.</div>
+    </div>`;
+  } else {
+    html += `<div class="class-rows">` + blocks.map((b) =>
+      classRowHTML(b, isToday && mins >= timeToMin(b.start) && mins < timeToMin(b.end))
+    ).join("") + `</div>`;
   }
-  html += `</tbody></table></div>
-  <p style="color:var(--text-faint);font-size:0.76rem;margin-top:10px">
-    Current day &amp; slot are highlighted. Breaks 08:50–09:20 · 12:50–13:00 · 14:40–14:50 · 15:40–15:50.</p>`;
+  html += `<p class="tt-note">Breaks 08:50–09:20 · 12:50–13:00 · 14:40–14:50 · 15:40–15:50</p>`;
   setHTML(box, html);
 }
 
 /* ---------- Render: Attendance ---------- */
-// SVG progress ring. pct in [0,100]; null renders an empty ring with "—".
-function ringSVG(pct, { size = 64, stroke = 6, label = null } = {}) {
-  const r = (size - stroke) / 2;
-  const c = 2 * Math.PI * r;
-  const p = pct == null ? 0 : Math.max(0, Math.min(100, pct));
-  const off = c * (1 - p / 100);
-  const text = label != null ? label : pct == null ? "—" : `${p.toFixed(1)}%`;
-  return `<svg class="ring" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" aria-hidden="true">
-    <circle class="ring-track" cx="${size / 2}" cy="${size / 2}" r="${r}" stroke-width="${stroke}"></circle>
-    <circle class="ring-fill" cx="${size / 2}" cy="${size / 2}" r="${r}" stroke-width="${stroke}"
-      stroke-dasharray="${c.toFixed(2)}" stroke-dashoffset="${off.toFixed(2)}"
-      transform="rotate(-90 ${size / 2} ${size / 2})"></circle>
-    <text class="ring-text" x="50%" y="50%" text-anchor="middle" dominant-baseline="central">${esc(text)}</text>
-  </svg>`;
+// Component type chip letter: the API sends L/T/P/S etc. (older data may carry
+// full words like "Theory"/"Practical") — either way the first letter is right.
+function typeLetter(t) {
+  const s = String(t || "").trim();
+  return s ? s[0].toUpperCase() : "?";
 }
 
-// Bunk hint as a pill badge (same thresholds as before: 75% is the minimum).
-function bunkPill(row) {
+// Bunk hint line: hours you must attend to reach 75%, or hours you can still
+// miss (75% is the minimum, same thresholds as before).
+function bunkHint(row) {
   const attended = num(row.attended), conducted = num(row.conducted);
   if (conducted === 0) return "";
   const pct = (attended / conducted) * 100;
   if (pct >= 75) {
     const n = Math.floor(attended / 0.75 - conducted);
-    return `<span class="bunk-pill ok"><i data-lucide="circle-check-big"></i>You can miss ${n} more class${n === 1 ? "" : "es"}</span>`;
+    return `<span class="cmp-hint ok">can miss <b>${n}</b> hr${n === 1 ? "" : "s"}</span>`;
   }
   const n = Math.ceil((0.75 * conducted - attended) / 0.25);
-  return `<span class="bunk-pill warn"><i data-lucide="triangle-alert"></i>Attend the next ${n} class${n === 1 ? "" : "es"} to recover</span>`;
+  return `<span class="cmp-hint warn">attend <b>${n}</b> hr${n === 1 ? "" : "s"} for 75%</span>`;
 }
 
 function renderAttendance() {
@@ -832,50 +841,78 @@ function renderAttendance() {
     return;
   }
 
+  // Group component rows (L/T/P/S) into one card per course.
+  const groups = [];
+  const byKey = new Map();
+  for (const r of rows) {
+    const key = `${r.course_code}@@${r.course_name}`;
+    let g = byKey.get(key);
+    if (!g) {
+      g = { code: r.course_code, name: r.course_name, rows: [], attended: 0, conducted: 0 };
+      byKey.set(key, g);
+      groups.push(g);
+    }
+    g.rows.push(r);
+    g.attended += num(r.attended);
+    g.conducted += num(r.conducted);
+  }
+  for (const g of groups) g.pct = g.conducted > 0 ? (g.attended / g.conducted) * 100 : null;
+
   const pct = weightedAttendance(rows);
   let attended = 0, conducted = 0;
   for (const r of rows) { attended += num(r.attended); conducted += num(r.conducted); }
 
   setHTML(sumBox, `
-    <div class="ring-banner ${pctClass(pct)}">
-      ${ringSVG(pct, { size: 84, stroke: 7 })}
-      <div class="ring-banner-meta">
-        <div class="ring-banner-title">Overall attendance (weighted)</div>
-        <div class="ring-banner-sub">${attended}/${conducted} classes · ${rows.length} course${rows.length === 1 ? "" : "s"}</div>
+    <div class="sum-banner ${pctClass(pct)}">
+      <div class="sum-banner-meta">
+        <div class="sum-banner-eyebrow">Overall · weighted</div>
+        <div class="sum-banner-sub">${attended}/${conducted} hrs · ${groups.length} course${groups.length === 1 ? "" : "s"} · ${rows.length} component${rows.length === 1 ? "" : "s"}</div>
       </div>
+      <div class="sum-banner-pct">${pct == null ? "—" : Math.round(pct) + "%"}</div>
     </div>`);
 
-  const safe = rows.filter((r) => num(r.percentage) >= 75).length;
+  const safe = groups.filter((g) => g.pct != null && g.pct >= 75).length;
   let html = `<div class="att-strip">
       <span class="strip-chip ok"><i data-lucide="shield-check"></i>${safe} safe</span>
-      <span class="strip-chip warn"><i data-lucide="shield-alert"></i>${rows.length - safe} at risk</span>
-    </div>
-    <div class="card-grid">`;
+      <span class="strip-chip warn"><i data-lucide="shield-alert"></i>${groups.length - safe} at risk</span>
+    </div>`;
 
-  rows.forEach((r, i) => {
-    const p = num(r.percentage);
-    const sub = [r.course_code, r.type, r.section].filter(Boolean).map(esc).join(" · ");
-    html += `<button type="button" class="card-btn att-card ${pctClass(p)}" data-att-idx="${i}">
-      <div class="cc-head">
-        <div class="cc-course">
-          <div class="cc-name">${esc(r.course_name || r.course_code)}</div>
-          <div class="cc-sub">${sub}</div>
+  groups.forEach((g, gi) => {
+    const letters = [...new Set(g.rows.map((r) => typeLetter(r.type)))].join("/");
+    html += `<div class="course-card">
+      <div class="course-head">
+        <div class="course-code">${esc(g.code)}</div>
+        <div class="course-name">${esc(g.name || g.code)}</div>
+      </div>
+      <div class="course-overall">
+        <div class="co-left">
+          <span class="co-eyebrow">Overall</span>
+          <span class="co-sub">Weighted (${esc(letters)}) · ${g.rows.length} component${g.rows.length === 1 ? "" : "s"}</span>
         </div>
-        ${ringSVG(p)}
+        <span class="co-pct ${pctClass(g.pct)}">${g.pct == null ? "—" : Math.round(g.pct) + "%"}</span>
       </div>
-      <div class="att-stats">
-        <div class="att-stat"><b>${esc(r.conducted)}</b><span>Conducted</span></div>
-        <div class="att-stat"><b>${esc(r.attended)}</b><span>Attended</span></div>
-        <div class="att-stat"><b>${esc(r.absent)}</b><span>Absent</span></div>
-      </div>
-      ${bunkPill(r)}
-    </button>`;
+      <div class="cmp-list">` + g.rows.map((r, ri) => {
+        const p = num(r.percentage);
+        return `<button type="button" class="cmp-row" data-att-course="${gi}" data-att-row="${ri}">
+          <span class="cmp-chip">${esc(typeLetter(r.type))}</span>
+          <span class="cmp-sec">${esc(r.section || "—")}</span>
+          <span class="cmp-nums">
+            <span class="cmp-pct ${pctClass(p)}">${Math.round(p)}% <span class="cmp-exact">(${esc(r.percentage)}%)</span></span>
+            <span class="cmp-frac">${esc(r.attended)}/${esc(r.conducted)} · ${esc(r.absent)} absent</span>
+            ${bunkHint(r)}
+          </span>
+        </button>`;
+      }).join("") + `</div>
+    </div>`;
   });
-  html += `</div><p class="grid-hint">Tap a course for day-by-day details.</p>`;
+  html += `<p class="grid-hint">Tap a component for day-by-day details.</p>`;
   setHTML(box, html);
 
-  box.querySelectorAll("[data-att-idx]").forEach((el) =>
-    el.addEventListener("click", () => openRegisterDetail(rows[+el.dataset.attIdx])));
+  box.querySelectorAll("[data-att-row]").forEach((el) =>
+    el.addEventListener("click", () => {
+      const g = groups[+el.dataset.attCourse];
+      openRegisterDetail(g.rows[+el.dataset.attRow]);
+    }));
 }
 
 async function openRegisterDetail(row) {
@@ -911,16 +948,6 @@ async function openRegisterDetail(row) {
 }
 
 /* ---------- Render: Grades ---------- */
-// Chip color per grade letter: O/S gold-ish, A green, B blue, F red, rest muted.
-function gradeChipClass(g) {
-  const t = String(g || "").trim().toUpperCase();
-  if (t === "O" || t === "S") return "grade-top";
-  if (t === "A") return "grade-a";
-  if (t === "B") return "grade-b";
-  if (t === "F") return "grade-f";
-  return "";
-}
-
 function renderGrades() {
   const rows = state.grades || [];
   const sumBox = $("#grades-summary");
@@ -937,29 +964,29 @@ function renderGrades() {
   const cgpa = cr > 0 ? gp / cr : null;
 
   setHTML(sumBox, cgpa == null ? "" : `
-    <div class="ring-banner">
-      ${ringSVG(cgpa * 10, { size: 84, stroke: 7, label: cgpa.toFixed(2) })}
-      <div class="ring-banner-meta">
-        <div class="ring-banner-title">CGPA</div>
-        <div class="ring-banner-sub">${cr} credits · ${rows.length} course${rows.length === 1 ? "" : "s"}</div>
-      </div>
+    <div class="cgpa-hero">
+      <span class="cgpa-chip">CGPA</span>
+      <div class="cgpa-num">${cgpa.toFixed(2)}</div>
+      <div class="cgpa-sub">all semesters · credit-weighted</div>
+      <div class="cgpa-meta">${cr} credits · ${rows.length} course${rows.length === 1 ? "" : "s"}</div>
     </div>`);
 
-  let html = `<div class="card-grid">`;
+  let html = `<div class="grade-list">`;
   rows.forEach((r, i) => {
-    const term = [r.academic_year, r.semester].filter(Boolean).map(esc).join(" ");
-    html += `<button type="button" class="card-btn" data-grade-idx="${i}">
-      <div class="cc-head">
-        <div class="cc-course">
-          <div class="cc-name">${esc(r.course_name || r.course_code)}</div>
-          <div class="cc-sub">${esc(r.course_code)}</div>
-        </div>
-        <span class="grade-chip ${gradeChipClass(r.grade)}">${esc(r.grade)}</span>
+    const term = [r.academic_year, r.semester].filter(Boolean).map(esc).join(" · ");
+    const failed = String(r.grade || "").trim().toUpperCase() === "F";
+    html += `<button type="button" class="card-btn grade-card" data-grade-idx="${i}">
+      <div class="gc-code">${esc(r.course_code)}</div>
+      <div class="gc-name">${esc(r.course_name || r.course_code)}</div>
+      <div class="gc-strip">
+        <div class="gc-cell"><span class="gc-label">Grade</span><span class="gc-val${failed ? " bad" : " accent"}">${esc(r.grade)}</span></div>
+        <div class="gc-cell"><span class="gc-label">GP</span><span class="gc-val">${esc(r.grade_point)}</span></div>
+        <div class="gc-cell"><span class="gc-label">Credits</span><span class="gc-val">${esc(r.credits)}</span></div>
+        <div class="gc-cell"><span class="gc-label">Status</span><span class="gc-val${failed ? " bad" : ""}">${failed ? "F" : "P"}</span></div>
       </div>
-      <div class="meta-row">
-        <span class="meta-item"><i data-lucide="layers"></i>${esc(r.credits)} credits</span>
-        <span class="meta-item"><i data-lucide="star"></i>${esc(r.grade_point)} grade points</span>
-        ${term ? `<span class="meta-item"><i data-lucide="calendar-days"></i>${term}</span>` : ""}
+      <div class="gc-foot">
+        <span class="gc-term">${term}</span>
+        <span class="gc-more">More details</span>
       </div>
     </button>`;
   });
@@ -1055,6 +1082,14 @@ $("#tt-year").addEventListener("change", () => loadTimetable(true));
 $("#tt-semester").addEventListener("change", () => loadTimetable(true));
 $("#att-year").addEventListener("change", () => loadAttendance(true));
 $("#att-semester").addEventListener("change", () => loadAttendance(true));
+
+// Day pills in the week view (rendered into #timetable-content)
+$("#timetable-content").addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-tt-day]");
+  if (!btn) return;
+  state.ttDay = btn.dataset.ttDay;
+  renderTimetable();
+});
 
 /* ---------- Init ---------- */
 loadStored();
