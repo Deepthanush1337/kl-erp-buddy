@@ -328,8 +328,10 @@ function greeting() {
 // KL ERP stores names surname-first ("Pothuru Deepthanush Chowdary"), so the
 // given name is the second token; single-token names just use what they have.
 function firstName(full) {
+  // ERP names come surname-first ("Pothuru Deepthanush Chowdary") — the given
+  // name is the longest token, so greet with that.
   const parts = String(full || "").trim().split(/\s+/).filter(Boolean);
-  const pick = parts.length > 1 ? parts[1] : parts[0] || "";
+  const pick = parts.reduce((a, b) => (b.length >= (a || "").length ? b : a), "");
   return pick ? pick[0].toUpperCase() + pick.slice(1).toLowerCase() : "";
 }
 
