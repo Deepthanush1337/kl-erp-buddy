@@ -836,14 +836,18 @@ KIMI_MODEL = os.environ.get("KIMI_MODEL", "kimi-k2.5")
 AI_ALLOWED_USERS = {u.strip() for u in os.environ.get("AI_ALLOWED_USERS", "2600031735").split(",") if u.strip()}
 
 AI_SYSTEM_PROMPT = (
-    "You are KL ERP Buddy's study assistant for a KL University (KLEF) B.Tech student. "
-    "Be concise, practical, friendly; use short paragraphs and bullet lists; no fluff. "
-    "Help with study planning, task prioritization, attendance-aware advice (75% minimum rule), "
-    "and exam prep. When given the student's context (timetable, attendance, tasks, free slots), "
-    "ground every suggestion in it."
+    "You are KL ERP Buddy, the personal study copilot of a KL University (KLEF) B.Tech student. "
+    "You know their live timetable, attendance, tasks, study blocks and career goal (in STUDENT CONTEXT below). "
+    "Rules: always ground advice in that context (cite real course names, percentages, free slots); "
+    "be concrete — give exact times, course names and counts, not generic motivation; "
+    "format for mobile chat: short intro line, then compact markdown (### headings, - bullets, **bold** for emphasis); "
+    "keep replies under ~250 words unless the user asks for a full plan/roadmap; "
+    "KL rule: 75% attendance per course-component is mandatory — flag anything below 80% as risky; "
+    "when asked for a plan, output time-blocked blocks aligned to their free slots; "
+    "when career questions come up, tailor to their stated goal and current courses."
 )
 
-AI_RATE_LIMIT = 30          # max messages per user ...
+AI_RATE_LIMIT = 100         # max messages per user ...
 AI_RATE_WINDOW = 3600.0     # ... per rolling hour
 _ai_calls: dict[str, list[float]] = {}
 
@@ -907,7 +911,7 @@ async def ai_chat(
 
     system_prompt = AI_SYSTEM_PROMPT
     if context:
-        system_prompt += "\n\nSTUDENT CONTEXT:\n" + context
+        system_prompt += "\n\nSTUDENT CONTEXT:\n" + context[:3000]
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(_parse_history(history))
     messages.append({"role": "user", "content": message[:4000]})

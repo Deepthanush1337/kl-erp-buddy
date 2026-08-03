@@ -238,10 +238,15 @@
             <h2 class="page-title">ai<span class="pdot">.</span></h2>
             <p class="tab-sub">Chat about classes, attendance &amp; tasks</p>
           </div>
-          <button class="btn btn-ghost refresh-btn" data-refresh="ai">
-            <i data-lucide="refresh-cw"></i>
-            Refresh
-          </button>
+          <div class="tab-actions">
+            <button id="personalize-btn" class="btn btn-ghost tab-icon-btn" title="Personalize your copilot" aria-label="Personalize your copilot">
+              <i data-lucide="sliders-horizontal"></i>
+            </button>
+            <button class="btn btn-ghost refresh-btn" data-refresh="ai">
+              <i data-lucide="refresh-cw"></i>
+              Refresh
+            </button>
+          </div>
         </div>
         <div id="ai-content"></div>
       </section>
@@ -259,6 +264,17 @@
         </button>
       </div>
       <div id="modal-body" class="modal-body"></div>
+    </div>
+  </div>
+
+  <!-- ============ ONBOARDING (one-time personalization) ============ -->
+  <div id="onboarding-overlay" class="onb-overlay hidden">
+    <div class="onb-card" role="dialog" aria-modal="true" aria-label="Personalize your copilot">
+      <div class="onb-head">
+        <span class="eyebrow">quick setup</span>
+        <div class="onb-dots" id="onb-dots" aria-hidden="true"></div>
+      </div>
+      <div id="onb-body"></div>
     </div>
   </div>
 

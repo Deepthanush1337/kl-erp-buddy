@@ -9,6 +9,8 @@ const LS_CREDS = "kl_erp_creds";
 const LS_PROFILE = "kl_erp_profile";
 const LS_OWNER = "kl_erp_owner";
 const LS_AI_HISTORY = "kl_erp_ai_history";
+const LS_PREFS = "kl_erp_prefs";
+const LS_TRACK_DISMISSED = "kl_erp_track_dismissed";
 
 /* ---------- State ---------- */
 const state = {
@@ -33,6 +35,7 @@ const state = {
   aiStatus: null,       // null = unchecked, "on", "off"
   aiSending: false,
   aiHistory: [],        // [{role: "user"|"assistant"|"error", content}] — capped at 20
+  prefs: null,          // {goal, interests, weekly_hours, onboarded} — Supabase prefs row / LS cache
 };
 
 /* ---------- DOM helpers ---------- */
@@ -422,6 +425,279 @@ function ownerId() {
   return id;
 }
 
+/* ---------- Prefs & onboarding (Supabase prefs table) ---------- */
+// One prefs row per device owner: goal, interests (comma string), weekly_hours
+// target, onboarded flag. Cached in localStorage after a finish/skip or a
+// remote hit so the app never refetches on every boot.
+function cachePrefs(p) {
+  state.prefs = p;
+  try { localStorage.setItem(LS_PREFS, JSON.stringify(p)); } catch { /* full — keep in memory */ }
+}
+
+function readCachedPrefs() {
+  try {
+    const p = JSON.parse(localStorage.getItem(LS_PREFS) || "null");
+    return p && typeof p === "object" && typeof p.onboarded === "boolean" ? p : null;
+  } catch { return null; }
+}
+
+// Entry point from showApp(): decides whether the one-time onboarding overlay
+// opens. Never blocks the app — any network trouble skips it for this session.
+async function initOnboarding() {
+  const cached = readCachedPrefs();
+  if (cached) {
+    state.prefs = cached;
+    if (cached.onboarded) { renderDashboard(); return; }
+    openOnboarding();
+    return;
+  }
+  if (MOCK_MODE) { openOnboarding(); return; }  // planner storage is never touched in mock mode
+  if (!sb) return;
+  try {
+    const { data, error } = await sb.from("prefs").select("*").eq("owner", ownerId()).maybeSingle();
+    if (error) throw new Error(error.message);
+    if (data && data.onboarded) {
+      cachePrefs({
+        goal: data.goal || "",
+        interests: data.interests || "",
+        weekly_hours: data.weekly_hours == null ? null : num(data.weekly_hours),
+        onboarded: true,
+      });
+      renderDashboard();
+    } else {
+      openOnboarding();
+    }
+  } catch { /* Supabase unreachable — skip onboarding this session */ }
+}
+
+async function upsertPrefs(p) {
+  if (MOCK_MODE || !sb) return;
+  const { error } = await sb.from("prefs").upsert({
+    owner: ownerId(),
+    goal: p.goal,
+    interests: p.interests,
+    weekly_hours: p.weekly_hours,
+    onboarded: p.onboarded,
+    updated_at: new Date().toISOString(),
+  }, { onConflict: "owner" });
+  if (error) throw new Error(error.message);
+}
+
+const ONB_GOALS = [
+  { id: "Product placements (SDE)", icon: "code-xml", blurb: "Crack SDE interviews — DSA, projects, referrals." },
+  { id: "Higher studies (GATE·MS)", icon: "graduation-cap", blurb: "GATE or MS abroad — strong fundamentals first." },
+  { id: "Startup", icon: "rocket", blurb: "Build and ship your own thing while in college." },
+  { id: "Govt & core jobs", icon: "landmark", blurb: "PSUs, govt exams and core engineering roles." },
+  { id: "Just survive sem", icon: "life-buoy", blurb: "Pass everything and keep attendance above 75%." },
+];
+const ONB_EXTRA_LANES = ["Web dev", "AI/ML", "Design", "Open source", "Competitive programming"];
+
+// Interest lanes derived from the student's actual courses (ERP course names +
+// courses.json titles), keyword-mapped to broader areas.
+function courseLanes() {
+  const lanes = [];
+  const add = (l) => { if (!lanes.includes(l)) lanes.push(l); };
+  for (const [code, name] of knownCourses()) {
+    const ci = courseInfo(code);
+    const t = `${name || ""} ${ci ? ci.title : ""}`.toLowerCase();
+    if (/data struct|algorithm/.test(t)) add("Algorithms & problem solving");
+    if (/java/.test(t)) add("Java dev");
+    if (/python/.test(t)) add("Python dev");
+    if (/math|calculus|algebra|probability|statistics/.test(t)) add("Math & theory");
+    if (/operating system/.test(t)) add("Systems & OS");
+    if (/network/.test(t)) add("Computer networks");
+    if (/database|dbms|sql/.test(t)) add("Databases");
+    if (/machine learning|artificial intelligence/.test(t)) add("AI/ML");
+    if (/web|full ?stack/.test(t)) add("Web dev");
+    if (/design/.test(t)) add("Design");
+    if (/iot|embedded|sensor/.test(t)) add("IoT & embedded");
+    if (/communication|soft skill/.test(t)) add("Communication skills");
+  }
+  return lanes;
+}
+
+// Weekly free hours estimated from timetable gaps (same rule as the plan tab:
+// gaps between merged blocks + after the last class until 21:00, >= 20 min).
+// Days with no classes contribute nothing — a conservative estimate.
+function weeklyFreeHours() {
+  if (!state.timetable) return null;
+  let mins = 0;
+  for (const d of DAY_KEYS) mins += freeSlotsForBlocks(blocksForDay(d)).reduce((s, g) => s + g.mins, 0);
+  return mins / 60;
+}
+
+const onb = { step: 1, goal: "", lanes: [], hours: 8 };
+
+function openOnboarding() {
+  const p = state.prefs || {};
+  onb.step = 1;
+  onb.goal = p.goal || "";
+  onb.lanes = String(p.interests || "").split(",").map((s) => s.trim()).filter(Boolean);
+  const free = weeklyFreeHours();
+  const def = free ? Math.min(10, Math.max(2, Math.round(free / 2))) : 8;
+  onb.hours = Math.min(20, Math.max(2, num(p.weekly_hours) || def));
+  $("#onboarding-overlay").classList.remove("hidden");
+  document.body.style.overflow = "hidden";
+  renderOnboarding();
+}
+
+function closeOnboarding() {
+  $("#onboarding-overlay").classList.add("hidden");
+  document.body.style.overflow = "";
+}
+
+function renderOnboarding() {
+  $("#onb-dots").innerHTML = [1, 2, 3].map((i) =>
+    `<span class="onb-dot${i === onb.step ? " active" : i < onb.step ? " done" : ""}"></span>`).join("");
+  let body = "";
+  if (onb.step === 1) {
+    body = `<h2 class="onb-title">what's the goal<span class="pdot">?</span></h2>
+      <p class="onb-sub">Plans, nudges and the AI copilot tune themselves around this.</p>
+      <div class="onb-goals">` + ONB_GOALS.map((g) => `
+        <button type="button" class="onb-goal${onb.goal === g.id ? " active" : ""}" data-onb-goal="${esc(g.id)}">
+          <i data-lucide="${esc(g.icon)}"></i>
+          <span class="onb-goal-text">
+            <span class="onb-goal-name">${esc(g.id)}</span>
+            <span class="onb-goal-blurb">${esc(g.blurb)}</span>
+          </span>
+        </button>`).join("") + `</div>`;
+  } else if (onb.step === 2) {
+    const derived = courseLanes();
+    const lanes = [...derived, ...ONB_EXTRA_LANES.filter((l) => !derived.includes(l))];
+    body = `<h2 class="onb-title">pick your lanes<span class="pdot">.</span></h2>
+      <p class="onb-sub">Built from your current courses, plus a few extras. Pick at least one.</p>
+      <div class="onb-chips">` + lanes.map((l) => `
+        <button type="button" class="onb-chip${onb.lanes.includes(l) ? " active" : ""}" data-onb-lane="${esc(l)}" aria-pressed="${onb.lanes.includes(l)}">${esc(l)}</button>`).join("") + `</div>`;
+  } else {
+    const free = weeklyFreeHours();
+    body = `<h2 class="onb-title">weekly hours<span class="pdot">.</span></h2>
+      <p class="onb-sub">How many focused study hours can you give outside class?</p>
+      <div class="onb-hours"><span class="onb-hours-num" id="onb-hours-num">${onb.hours}</span><span class="onb-hours-unit">hrs / week</span></div>
+      <input type="range" id="onb-range" class="onb-range" min="2" max="20" step="1" value="${onb.hours}" aria-label="Weekly study hours target" />
+      ${free ? `<p class="onb-hint">from my free slots · ~${free.toFixed(1)}h free between and after classes each week</p>` : ""}`;
+  }
+  body += `<div class="onb-foot">
+      <div class="onb-foot-left">
+        ${onb.step > 1 ? `<button type="button" class="btn btn-ghost" data-onb-back><i data-lucide="arrow-left"></i>Back</button>` : ""}
+        <button type="button" class="btn btn-ghost" data-onb-skip>skip for now</button>
+      </div>
+      ${onb.step < 3
+        ? `<button type="button" class="btn btn-primary" data-onb-next${onb.step === 1 && !onb.goal ? " disabled" : ""}${onb.step === 2 && onb.lanes.length === 0 ? " disabled" : ""}>Next<i data-lucide="arrow-right"></i></button>`
+        : `<button type="button" class="btn btn-primary" data-onb-finish><i data-lucide="check"></i>Finish</button>`}
+    </div>`;
+  setHTML("#onb-body", body);
+}
+
+$("#onboarding-overlay").addEventListener("click", (e) => {
+  const goalBtn = e.target.closest("[data-onb-goal]");
+  if (goalBtn) { onb.goal = goalBtn.dataset.onbGoal; renderOnboarding(); return; }
+  const laneBtn = e.target.closest("[data-onb-lane]");
+  if (laneBtn) {
+    const l = laneBtn.dataset.onbLane;
+    onb.lanes = onb.lanes.includes(l) ? onb.lanes.filter((x) => x !== l) : [...onb.lanes, l];
+    renderOnboarding();
+    return;
+  }
+  if (e.target.closest("[data-onb-back]")) { onb.step = Math.max(1, onb.step - 1); renderOnboarding(); return; }
+  if (e.target.closest("[data-onb-next]")) {
+    if (onb.step === 1 && !onb.goal) return;
+    if (onb.step === 2 && onb.lanes.length === 0) return;
+    onb.step = Math.min(3, onb.step + 1);
+    renderOnboarding();
+    return;
+  }
+  if (e.target.closest("[data-onb-skip]")) { skipOnboarding(); return; }
+  if (e.target.closest("[data-onb-finish]")) { finishOnboarding(); }
+});
+
+$("#onboarding-overlay").addEventListener("input", (e) => {
+  if (e.target.id !== "onb-range") return;
+  onb.hours = +e.target.value || 2;
+  const numEl = document.getElementById("onb-hours-num");
+  if (numEl) numEl.textContent = String(onb.hours);
+});
+
+async function finishOnboarding() {
+  const p = { goal: onb.goal, interests: onb.lanes.join(", "), weekly_hours: onb.hours, onboarded: true };
+  cachePrefs(p);
+  closeOnboarding();
+  try {
+    await upsertPrefs(p);
+    toast("Setup done — your copilot is personalized", "success");
+  } catch {
+    toast("Saved on this device — will sync when the connection is back.", "info");
+  }
+  renderDashboard();
+}
+
+function skipOnboarding() {
+  const p = { goal: "", interests: "", weekly_hours: null, onboarded: true };
+  cachePrefs(p);
+  closeOnboarding();
+  upsertPrefs(p).catch(() => { /* stays local — user can redo via the AI tab */ });
+  toast("Skipped — personalize anytime from the AI tab.", "info");
+  renderDashboard();
+}
+
+/* ---------- Dashboard "your track." card ---------- */
+// Dismissal is keyed to the prefs content, so the card resurfaces when the
+// user re-personalizes (the signature changes).
+function trackSig(p) { return `${p.goal}|${p.interests}|${p.weekly_hours}`; }
+
+// Rule-based focus chips from goal + current courses + attendance risk.
+function trackChips(p) {
+  const chips = [];
+  const add = (c) => { if (chips.length < 3 && !chips.includes(c)) chips.push(c); };
+  const titles = knownCourses().map(([code, name]) => {
+    const ci = courseInfo(code);
+    return `${name || ""} ${ci ? ci.title : ""}`.toLowerCase();
+  });
+  const has = (re) => titles.some((t) => re.test(t));
+  const goal = String(p.goal || "").toLowerCase();
+  // Goal-specific, course-derived chips first…
+  if (goal.includes("placement")) {
+    if (has(/data struct|algorithm/)) add("DSA grind");
+    if (has(/java|python|full ?stack|web/)) add("Build projects");
+  } else if (goal.includes("higher studies")) {
+    if (has(/math/)) add("Math fundamentals");
+    if (has(/data struct|algorithm/)) add("DSA for GATE");
+  } else if (goal.includes("startup")) {
+    add("Ship a side project");
+    if (has(/full ?stack|web/)) add("Full-stack reps");
+  } else if (goal.includes("govt") || goal.includes("core")) {
+    if (has(/math/)) add("Aptitude & math");
+    add("Core notes revision");
+  }
+  // …then any course under 80% attendance…
+  for (const g of attendanceGroups()) {
+    if (g.pct != null && g.pct < 80) {
+      const ci = courseInfo(g.code);
+      add(`Fix ${ci && ci.acronym ? ci.acronym : g.code} attendance`);
+    }
+  }
+  // …then generic fillers for the goal.
+  if (goal.includes("placement")) add("Aptitude & DSA reps");
+  else if (goal.includes("higher studies")) add("PYQ practice");
+  else if (goal.includes("startup")) add("Build in public");
+  else if (goal.includes("govt") || goal.includes("core")) add("PYQ practice");
+  else add("Stay ahead of deadlines");
+  add("Weekly revision block");
+  return chips.slice(0, 3);
+}
+
+function trackCardHTML() {
+  const p = state.prefs;
+  if (!p || !p.onboarded || !p.goal) return "";
+  try { if (localStorage.getItem(LS_TRACK_DISMISSED) === trackSig(p)) return ""; } catch { /* private mode */ }
+  return `<div class="track-card">
+    <button type="button" class="btn-icon track-dismiss" data-track-dismiss aria-label="Dismiss"><i data-lucide="x"></i></button>
+    <span class="hero-eyebrow">your track</span>
+    <div class="track-title">${esc(p.goal)}</div>
+    <div class="track-chips">${trackChips(p).map((c) => `<span class="track-chip">${esc(c)}</span>`).join("")}</div>
+    <button type="button" class="track-ai-link" data-track-roadmap>ask ai to build your roadmap &rarr;</button>
+  </div>`;
+}
+
 /* ---------- Turnstile (Cloudflare human verification) ---------- */
 // The widget div lives on the login screen; the site key is injected here so it
 // only ever lives in config.js. api.js is async: if it finished loading before
@@ -466,6 +742,7 @@ function showApp() {
   switchTab("dashboard");
   loadDashboard();
   loadTimetable();
+  initOnboarding();
 }
 
 function greeting() {
@@ -886,6 +1163,7 @@ function renderDashboard() {
 
   setHTML(box, `
     ${classHero(blocks)}
+    ${trackCardHTML()}
     <div class="stats-grid">
       <div class="stat-card">
         <div class="stat-icon"><i data-lucide="percent"></i></div>
@@ -919,6 +1197,23 @@ function renderDashboard() {
     ).join("")}</div>`}
   `);
 }
+
+// "your track." card: dismiss (remembered per prefs signature) and the
+// roadmap link, which jumps to the AI tab with a preset prompt.
+$("#dashboard-content").addEventListener("click", async (e) => {
+  if (e.target.closest("[data-track-dismiss]")) {
+    if (state.prefs) {
+      try { localStorage.setItem(LS_TRACK_DISMISSED, trackSig(state.prefs)); } catch { /* private mode */ }
+    }
+    renderDashboard();
+    return;
+  }
+  if (e.target.closest("[data-track-roadmap]")) {
+    switchTab("ai");
+    if (!state.aiStatus) await loadAi();
+    sendAi(roadmapPrompt());
+  }
+});
 
 /* ---------- Render: Timetable ---------- */
 // Day-tab view: MON..SUN pills (active = lime, a tiny dot marks today) with the
@@ -981,21 +1276,12 @@ function bunkHint(row) {
   return `<span class="cmp-hint warn">Attend the next <b>${n}</b> hr${n === 1 ? "" : "s"} to reach 75%</span>`;
 }
 
-function renderAttendance() {
-  const rows = state.attendance || [];
-  const sumBox = $("#attendance-summary");
-  const box = $("#attendance-content");
-
-  if (rows.length === 0) {
-    setHTML(sumBox, "");
-    setHTML(box, emptyState("No attendance records", "Nothing to show for this term yet.", "chart-column"));
-    return;
-  }
-
-  // Group component rows (L/T/P/S) into one card per course.
+// Group component rows (L/T/P/S) into one object per course with weighted
+// totals — shared by the attendance view, the track card and the AI context.
+function attendanceGroups() {
   const groups = [];
   const byKey = new Map();
-  for (const r of rows) {
+  for (const r of state.attendance || []) {
     const key = `${r.course_code}@@${r.course_name}`;
     let g = byKey.get(key);
     if (!g) {
@@ -1008,6 +1294,21 @@ function renderAttendance() {
     g.conducted += num(r.conducted);
   }
   for (const g of groups) g.pct = g.conducted > 0 ? (g.attended / g.conducted) * 100 : null;
+  return groups;
+}
+
+function renderAttendance() {
+  const rows = state.attendance || [];
+  const sumBox = $("#attendance-summary");
+  const box = $("#attendance-content");
+
+  if (rows.length === 0) {
+    setHTML(sumBox, "");
+    setHTML(box, emptyState("No attendance records", "Nothing to show for this term yet.", "chart-column"));
+    return;
+  }
+
+  const groups = attendanceGroups();
 
   const pct = weightedAttendance(rows);
   let attended = 0, conducted = 0;
@@ -1229,10 +1530,9 @@ function renderSeating() {
 /* ---------- Plan: study planner + tasks (Supabase) ---------- */
 const PRIO_LABELS = ["LOW", "NORM", "HIGH"];
 
-// Today's free time: gaps between merged class blocks, plus after the last
-// class until 21:00. Slivers under 20 min (short slot breaks) are dropped.
-function freeSlotsToday() {
-  const blocks = todaysBlocks();
+// Free time for a set of merged class blocks: gaps between blocks, plus after
+// the last class until 21:00. Slivers under 20 min (short slot breaks) are dropped.
+function freeSlotsForBlocks(blocks) {
   const DAY_END = 21 * 60;
   const gaps = [];
   for (let i = 1; i < blocks.length; i++) {
@@ -1248,6 +1548,8 @@ function freeSlotsToday() {
     .filter(([s, e]) => e - s >= 20)
     .map(([s, e]) => ({ start: minToTime(s), end: minToTime(e), mins: e - s }));
 }
+
+function freeSlotsToday() { return freeSlotsForBlocks(todaysBlocks()); }
 
 // Courses for the dropdowns: timetable slot codes (type suffix stripped) plus
 // attendance course codes, deduped. Display names come from attendance (ERP)
@@ -1682,9 +1984,60 @@ $("#plan-content").addEventListener("submit", (e) => {
 /* ---------- AI chat (POST /ai/chat) ---------- */
 const AI_QUICK = {
   plan: "Plan my day: using today's free slots between my classes, suggest a concrete study plan with times.",
-  attention: "What needs attention? Check my attendance and pending tasks, then tell me what to focus on first.",
-  week: "Summarize my week: classes, attendance risks and study goals.",
+  attendance: "Fix my attendance: based on my per-course numbers, which upcoming classes can I safely skip and which must I attend to stay at or above 75%?",
+  exam: "Exam prep: build a revision plan for my current courses, prioritizing the ones where I'm weakest.",
 };
+
+// Roadmap prompt is shared by the quick chip and the dashboard track card.
+function roadmapPrompt() {
+  const goal = state.prefs && state.prefs.goal ? ` My goal is ${state.prefs.goal}.` : "";
+  return `Build my career roadmap: a semester-long plan aligned to my goal and current courses, with monthly milestones and concrete weekly actions.${goal}`;
+}
+
+// Tiny safe markdown renderer for AI bubbles. The raw text is escaped FIRST;
+// every transform below then operates on entities, so no raw AI HTML can ever
+// be injected. Supports: ### h3 / ## h4, **bold**, *italic*, - / • bullets,
+// numbered lists, blank-line paragraphs and `code` spans.
+function mdToHtml(text) {
+  const inline = (s) => s
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/\*([^*\n]+)\*/g, "<em>$1</em>");
+  const blocks = [];
+  let list = null;   // {type: "ul"|"ol", items: []}
+  let para = [];
+  const flushList = () => {
+    if (!list) return;
+    blocks.push(`<${list.type}>` + list.items.map((it) => `<li>${inline(it)}</li>`).join("") + `</${list.type}>`);
+    list = null;
+  };
+  const flushPara = () => {
+    if (!para.length) return;
+    blocks.push(`<p>` + para.map(inline).join("<br>") + `</p>`);
+    para = [];
+  };
+  for (const rawLine of esc(text).split("\n")) {
+    const t = rawLine.trim();
+    if (!t) { flushList(); flushPara(); continue; }
+    let m;
+    if ((m = t.match(/^#{3,}\s+(.*)/))) { flushList(); flushPara(); blocks.push(`<h3>${inline(m[1])}</h3>`); continue; }
+    if ((m = t.match(/^#{1,2}\s+(.*)/))) { flushList(); flushPara(); blocks.push(`<h4>${inline(m[1])}</h4>`); continue; }
+    if ((m = t.match(/^(?:-|•)\s+(.*)/))) {
+      if (!list || list.type !== "ul") { flushList(); flushPara(); list = { type: "ul", items: [] }; }
+      list.items.push(m[1]);
+      continue;
+    }
+    if ((m = t.match(/^\d+[.)]\s+(.*)/))) {
+      if (!list || list.type !== "ol") { flushList(); flushPara(); list = { type: "ol", items: [] }; }
+      list.items.push(m[1]);
+      continue;
+    }
+    flushList();
+    para.push(t);
+  }
+  flushList(); flushPara();
+  return blocks.join("");
+}
 
 function loadAiHistory() {
   try { state.aiHistory = JSON.parse(localStorage.getItem(LS_AI_HISTORY) || "[]"); }
@@ -1719,7 +2072,9 @@ async function loadAi(force) {
 
 function aiBubbleHTML(m) {
   const cls = m.role === "user" ? "user" : m.role === "error" ? "err" : "ai";
-  return `<div class="chat-bubble ${cls}">${esc(m.content)}</div>`;
+  // User bubbles stay plain text; assistant bubbles get the markdown treatment.
+  const body = m.role === "assistant" ? mdToHtml(m.content) : esc(m.content);
+  return `<div class="chat-bubble ${cls}${m.role === "assistant" ? " md" : ""}">${body}</div>`;
 }
 
 function renderAi() {
@@ -1735,7 +2090,10 @@ function renderAi() {
 
   let html = `<div class="chat-list" id="ai-list">`;
   if (state.aiHistory.length === 0) {
-    html += `<div class="chat-bubble ai">Hey! Ask me about your classes, attendance or tasks — or tap a shortcut below.</div>`;
+    const goal = state.prefs && state.prefs.onboarded && state.prefs.goal;
+    html += `<div class="chat-bubble ai">${goal
+      ? esc(`Ready to work toward ${state.prefs.goal}? Ask me anything.`)
+      : "Hey! Ask me about your classes, attendance or tasks — or tap a shortcut below."}</div>`;
   }
   html += state.aiHistory.map(aiBubbleHTML).join("");
   if (state.aiSending) {
@@ -1744,8 +2102,9 @@ function renderAi() {
   html += `</div>
     <div class="chat-quick">
       <button type="button" class="quick-chip" data-ai-quick="plan"${dis}>Plan my day</button>
-      <button type="button" class="quick-chip" data-ai-quick="attention"${dis}>What needs attention?</button>
-      <button type="button" class="quick-chip" data-ai-quick="week"${dis}>Summarize my week</button>
+      <button type="button" class="quick-chip" data-ai-quick="attendance"${dis}>Fix my attendance</button>
+      <button type="button" class="quick-chip" data-ai-quick="roadmap"${dis}>Career roadmap</button>
+      <button type="button" class="quick-chip" data-ai-quick="exam"${dis}>Exam prep</button>
     </div>
     <form id="ai-form" class="chat-form">
       <input type="text" id="ai-input" maxlength="500" placeholder="Ask about classes, attendance, tasks…" autocomplete="off"${dis} />
@@ -1760,34 +2119,58 @@ function renderAi() {
 }
 
 // Compact snapshot of the student's situation, sent with every message.
+// Short lines, hard-capped so the payload stays small.
 function buildAiContext() {
   const lines = [];
   const p = state.profile || {};
-  const who = p.name ? `${p.name}${p.roll_no ? " (" + p.roll_no + ")" : ""}` : (state.creds ? state.creds.username : "");
-  if (who) lines.push(`Student: ${who}`);
+  if (p.name) {
+    lines.push(`Profile: ${p.name}${p.roll_no ? " · " + p.roll_no : ""}${p.department ? " · " + deptShort(p.department) : ""}`);
+  } else if (state.creds) {
+    lines.push(`Profile: ${state.creds.username}`);
+  }
+  if (state.prefs && state.prefs.goal) {
+    lines.push(`Career goal: ${state.prefs.goal}`);
+    if (state.prefs.interests) lines.push(`Interests: ${state.prefs.interests}`);
+    if (state.prefs.weekly_hours) lines.push(`Weekly study target: ${state.prefs.weekly_hours}h`);
+  }
   const blocks = todaysBlocks();
   lines.push(blocks.length
-    ? "Today's classes: " + blocks.map((b) => `${courseLabel(b.code)} ${b.start}-${b.end}`).join(", ")
-    : "No classes today.");
-  if (state.attendance && state.attendance.length) {
-    const g = new Map();
-    for (const r of state.attendance) {
-      const k = r.course_code || "?";
-      const cur = g.get(k) || { a: 0, c: 0 };
-      cur.a += num(r.attended); cur.c += num(r.conducted);
-      g.set(k, cur);
-    }
-    const parts = [];
-    for (const [k, v] of g) parts.push(`${courseLabel(k)} ${v.c ? Math.round((v.a / v.c) * 100) + "%" : "—"}`);
-    lines.push("Attendance: " + parts.join(", "));
-  }
-  const open = (state.planTasks || []).filter((t) => !t.done);
-  lines.push(`Pending tasks: ${open.length}` +
-    (open.length ? " (" + open.slice(0, 3).map((t) => t.title).join("; ") + ")" : ""));
+    ? "Today: " + blocks.map((b) => `${courseLabel(b.code)} ${b.start}-${b.end}`).join("; ")
+    : "Today: no classes.");
   const free = freeSlotsToday();
-  if (free.length) lines.push("Free slots today: " + free.map((f) => `${f.start}-${f.end}`).join(", "));
+  if (free.length) lines.push("Free today: " + free.map((f) => `${f.start}-${f.end}`).join(", "));
+  const tmr = blocksForDay(DAY_KEYS[(new Date().getDay() + 7) % 7]);
+  lines.push(tmr.length
+    ? "Tomorrow: " + tmr.map((b) => `${courseLabel(b.code)} ${b.start}-${b.end}`).join("; ")
+    : "Tomorrow: no classes.");
+  const groups = attendanceGroups();
+  if (groups.length) {
+    lines.push("Attendance:");
+    for (const g of groups) {
+      let bunk = "";
+      if (g.conducted > 0 && g.pct != null) {
+        bunk = g.pct >= 75
+          ? `can miss ${Math.floor(g.attended / 0.75 - g.conducted)}`
+          : `need ${Math.ceil((0.75 * g.conducted - g.attended) / 0.25)}`;
+      }
+      lines.push(`- ${g.name || g.code}: ${g.pct == null ? "—" : Math.round(g.pct) + "%"} (${g.attended}/${g.conducted})${bunk ? ", " + bunk : ""}`);
+    }
+  }
+  const open = (state.planTasks || []).filter((t) => !t.done).slice(0, 5);
+  if (open.length) {
+    lines.push("Pending tasks:");
+    for (const t of open) lines.push(`- ${t.title}${t.due_date ? " (due " + t.due_date + ")" : ""}`);
+  }
+  const [wkStart, wkEnd] = weekRangeISO();
+  const weekMins = (state.planBlocks || [])
+    .filter((b) => b.day >= wkStart && b.day <= wkEnd)
+    .reduce((s, b) => s + blockMins(b), 0);
+  const goalHrs = (state.planGoals || []).reduce((s, g) => s + num(g.weekly_hours), 0);
+  if (weekMins > 0 || goalHrs > 0) {
+    lines.push(`Study this week: ${(weekMins / 60).toFixed(1)}h planned of ${goalHrs}h goal`);
+  }
   let s = lines.join("\n");
-  if (s.length > 1000) s = s.slice(0, 997) + "..."; // titles make lines longer — keep the free-slots line intact
+  if (s.length > 2800) s = s.slice(0, 2797) + "...";
   return s;
 }
 
@@ -1872,8 +2255,14 @@ $("#ai-content").addEventListener("submit", (e) => {
 
 $("#ai-content").addEventListener("click", (e) => {
   const q = e.target.closest("[data-ai-quick]");
-  if (q && AI_QUICK[q.dataset.aiQuick]) sendAi(AI_QUICK[q.dataset.aiQuick]);
+  if (!q) return;
+  const key = q.dataset.aiQuick;
+  const text = key === "roadmap" ? roadmapPrompt() : AI_QUICK[key];
+  if (text) sendAi(text);
 });
+
+// Reopen the personalization overlay (prefilled from existing prefs).
+$("#personalize-btn").addEventListener("click", openOnboarding);
 
 /* ---------- Selectors ---------- */
 ["#tt-year", "#att-year"].forEach((s) => buildYearOptions($(s)));
