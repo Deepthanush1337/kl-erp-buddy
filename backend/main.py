@@ -1080,6 +1080,8 @@ async def ai_chat(
         raise HTTPException(status_code=502, detail="AI service error. Try again later.")
 
     async def token_stream():
+        # NDJSON protocol: one JSON object per line — {"r": reasoning delta}
+        # while the model thinks, then {"t": content delta} as it answers.
         total = 0
         try:
             async for line in upstream.aiter_lines():
@@ -1090,15 +1092,19 @@ async def ai_chat(
                     break
                 try:
                     chunk = json.loads(payload)
-                    text = chunk["choices"][0].get("delta", {}).get("content") or ""
+                    delta = chunk["choices"][0].get("delta", {})
+                    rc = delta.get("reasoning_content") or ""
+                    ct = delta.get("content") or ""
                 except Exception:
                     continue
-                if text:
-                    total += len(text)
-                    yield text
+                if rc:
+                    yield json.dumps({"r": rc}) + "\n"
+                if ct:
+                    total += len(ct)
+                    yield json.dumps({"t": ct}) + "\n"
         finally:
             await stream_ctx.__aexit__(None, None, None)
             await client.aclose()
             logger.info("[AI] streamed reply for user=%s (%d chars)", username, total)
 
-    return StreamingResponse(token_stream(), media_type="text/plain; charset=utf-8")
+    return StreamingResponse(token_stream(), media_type="application/x-ndjson; charset=utf-8")

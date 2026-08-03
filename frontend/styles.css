@@ -2535,3 +2535,30 @@ img { max-width: 100%; }
 @media (prefers-reduced-motion: reduce) {
   .about-panel, .crew-card { animation: none; transition: none; }
 }
+
+/* Live "thought" bubble — the model's reasoning while it thinks */
+.chat-bubble.thought {
+  align-self: flex-start;
+  max-width: 88%;
+  background: transparent;
+  border: 1px dashed var(--border, #26262d);
+  box-shadow: none;
+  color: var(--text-faint);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.72rem;
+  font-style: italic;
+  line-height: 1.45;
+  max-height: 7.5em;
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+.chat-bubble.thought::-webkit-scrollbar { display: none; }
+.chat-bubble.thought::before {
+  content: "thinking…";
+  display: block;
+  color: var(--purple, #7c5cfc);
+  font-style: normal;
+  font-size: 0.66rem;
+  letter-spacing: 0.08em;
+  margin-bottom: 4px;
+}

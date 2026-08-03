@@ -2691,22 +2691,40 @@ async function aiChat(message, history, context, onDelta) {
     if (data.cookies) saveCookies(data.cookies);
     if (data.success === false) throw new Error(data.message || data.detail || "Request failed");
     const reply = String(data.reply || "").trim() || "(empty reply)";
-    if (onDelta) onDelta(reply);
+    if (onDelta) onDelta("t", reply, "");
     return reply;
   }
 
-  // Streaming path (text/plain token deltas)
+  // Streaming path: NDJSON lines {"r": reasoning delta} while the model thinks,
+  // then {"t": content delta} as it answers. Plain-text = legacy all-content.
+  const isNdjson = ctype.includes("ndjson");
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
-  let full = "";
+  let buf = "", reply = "", thought = "";
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
-    full += decoder.decode(value, { stream: true });
-    if (onDelta) onDelta(full);
+    buf += decoder.decode(value, { stream: true });
+    if (!isNdjson) {
+      reply = buf;
+      if (onDelta) onDelta("t", reply, thought);
+      continue;
+    }
+    let nl;
+    while ((nl = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, nl);
+      buf = buf.slice(nl + 1);
+      if (!line.trim()) continue;
+      try {
+        const obj = JSON.parse(line);
+        if (obj.r) thought += obj.r;
+        if (obj.t) reply += obj.t;
+      } catch { /* partial line — skip */ }
+    }
+    if (onDelta) onDelta(reply ? "t" : "r", reply, thought);
   }
-  full += decoder.decode();
-  return full.trim() || "(empty reply)";
+  reply += decoder.decode();
+  return reply.trim() || "(empty reply)";
 }
 
 async function sendAi(text) {
@@ -2718,38 +2736,53 @@ async function sendAi(text) {
   pushAi("user", text);
   renderAi();
 
-  // Live-streaming bubble: appended directly to the list so we don't rebuild
-  // the whole chat on every token. The thinking dots stay until token #1.
+  // Live-streaming bubbles: a dim "thought" bubble shows the model's reasoning
+  // as it happens (instant feedback), the answer streams into its own bubble.
   const list = document.getElementById("ai-list");
-  let streamEl = null;
-  let lastRender = 0;
-  const paint = (full, force) => {
+  let streamEl = null, thoughtEl = null, lastRender = 0;
+  const paint = (kind, replyText, thoughtText, force) => {
     const now = Date.now();
-    if (!force && now - lastRender < 90) return;   // throttle markdown re-render
+    if (!force && now - lastRender < 90) return;   // throttle re-render
     lastRender = now;
-    if (!streamEl && list) {
-      const thinking = list.querySelector(".thinking");
+    if (!list) return;
+    const thinking = list.querySelector(".thinking");
+    if (kind === "r" && thoughtText) {
       if (thinking) thinking.remove();
-      streamEl = document.createElement("div");
-      streamEl.className = "chat-bubble ai md streaming";
-      list.appendChild(streamEl);
+      if (!thoughtEl) {
+        thoughtEl = document.createElement("div");
+        thoughtEl.className = "chat-bubble thought";
+        list.appendChild(thoughtEl);
+      }
+      thoughtEl.textContent = thoughtText.length > 500 ? "…" + thoughtText.slice(-500) : thoughtText;
     }
-    if (streamEl) {
-      streamEl.innerHTML = mdToHtml(full);
-      if (list) list.scrollTop = list.scrollHeight;
+    if (kind === "t" && replyText) {
+      if (thinking) thinking.remove();
+      if (!streamEl) {
+        streamEl = document.createElement("div");
+        streamEl.className = "chat-bubble ai md streaming";
+        list.appendChild(streamEl);
+      }
+      streamEl.innerHTML = mdToHtml(replyText);
     }
+    list.scrollTop = list.scrollHeight;
   };
 
   try {
     let reply;
     if (MOCK_MODE) {
+      let thought = "";
+      for (const w of ["Let me", " check", " your", " timetable", " and", " attendance", " data", "…"]) {
+        await new Promise((r) => setTimeout(r, 70));
+        thought += w;
+        paint("r", "", thought, false);
+      }
       reply = "";
       for (const ch of MOCK_AI_REPLY.match(/[^ ]+ ?/g) || [MOCK_AI_REPLY]) {
         await new Promise((r) => setTimeout(r, 35));
         reply += ch;
-        paint(reply, false);
+        paint("t", reply, thought, false);
       }
-      paint(reply, true);
+      paint("t", reply, thought, true);
     } else {
       // Prior turns only (the current message goes in "message"), last 10,
       // error bubbles excluded from what the backend sees.
@@ -2758,8 +2791,8 @@ async function sendAi(text) {
         .slice(0, -1)
         .slice(-10)
         .map((m) => ({ role: m.role, content: m.content }));
-      reply = await aiChat(text, prior, buildAiContext(), (partial) => paint(partial, false));
-      paint(reply, true);
+      reply = await aiChat(text, prior, buildAiContext(), (kind, r, th) => paint(kind, r, th, false));
+      paint("t", reply, "", true);
     }
     pushAi("assistant", reply);
   } catch (err) {
