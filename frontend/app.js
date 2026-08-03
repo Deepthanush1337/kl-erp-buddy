@@ -800,6 +800,7 @@ function showApp() {
   loadDashboard();
   loadTimetable();
   initOnboarding();
+  scheduleIdlePrefetch();
 }
 
 function greeting() {
@@ -1371,7 +1372,7 @@ function fetchSeatingFresh() {
     state.seating = fresh;
     cacheWrite("seating", "", fresh);
     stampShow("exams", Date.now());
-    if (changed) renderSeating();
+    if (changed) { renderSeating(); renderDashboard(); } // dashboard shows the exam countdown
   });
 }
 
@@ -1458,6 +1459,7 @@ async function loadSeating(force) {
     if (cached) {
       state.seating = cached.d;
       renderSeating();
+      renderDashboard(); // exam countdown strip picks up the cached seating
       stampShow("exams", cached.t);
     } else {
       setHTML("#exams-content", skelRows(4));
@@ -1494,12 +1496,30 @@ async function loadDashboard() {
   } else {
     renderDashboard(); // cached/hydrated data — paint before any network
   }
-  // Prefetch both feeds in parallel; the loaders are SWR, so cached data
+  // Prefetch all three feeds in parallel; the loaders are SWR, so cached data
   // paints instantly and fresh copies re-render only when something changed.
-  await Promise.allSettled([loadAttendance(), loadTimetable()]);
+  // Seating rides along so the dashboard can show the next-exam countdown.
+  await Promise.allSettled([loadAttendance(), loadTimetable(), loadSeating()]);
   if (state.attendance === null) state.attendance = [];
   if (state.timetable === null) state.timetable = {};
   renderDashboard();
+}
+
+/* ---------- Idle prefetch (perceived speed) ---------- */
+// Once the dashboard has painted, warm the grades + seating feeds through the
+// shared deduped fetchers (write-through to the SWR cache) so those tabs open
+// instantly. Runs at most once per session; failures stay silent by design.
+let idlePrefetchDone = false;
+function scheduleIdlePrefetch() {
+  if (idlePrefetchDone) return;
+  idlePrefetchDone = true;
+  const warm = () => {
+    if (!state.creds) return;
+    fetchGradesFresh().catch(() => { /* warm-up is best-effort */ });
+    fetchSeatingFresh().catch(() => { /* warm-up is best-effort */ });
+  };
+  if (typeof window.requestIdleCallback === "function") window.requestIdleCallback(warm, { timeout: 2000 });
+  else setTimeout(warm, 2000);
 }
 
 /* ---------- Render: Dashboard ---------- */
@@ -1639,6 +1659,7 @@ function renderDashboard() {
 
   setHTML(box, `
     ${classHero(blocks)}
+    ${examCountdownHTML()}
     ${trackCardHTML()}
     <div class="stats-grid">
       <div class="stat-card">
@@ -1773,6 +1794,54 @@ function attendanceGroups() {
   return groups;
 }
 
+// Consecutive classes to attend to reach `target`% from attended/conducted.
+// 0 = already there ("safe"), null = nothing conducted yet (chip hidden).
+function classesTo(attended, conducted, target) {
+  if (conducted <= 0) return null;
+  if ((attended / conducted) * 100 >= target) return 0;
+  return Math.ceil(((target / 100) * conducted - attended) / (1 - target / 100));
+}
+
+// "to 75%: N / safe" quick chips in the course header, from component totals.
+function headChipsHTML(g) {
+  const t75 = classesTo(g.attended, g.conducted, 75);
+  if (t75 == null) return "";
+  const t85 = classesTo(g.attended, g.conducted, 85);
+  const chip = (target, n) =>
+    `<span class="head-chip ${n === 0 ? "ok" : target === 75 ? "warn" : "mid"}">to ${target}%: ${n === 0 ? "safe" : n}</span>`;
+  return `<div class="head-chips">${chip(75, t75)}${chip(85, t85)}</div>`;
+}
+
+/* --- Bunk simulator: per-row ± steppers, reset whenever the data changes --- */
+// Keyed "groupIndex:rowIndex" -> signed n (+n = attend n more, -n = miss n more).
+const bunkSims = new Map();
+let bunkSig = "";
+
+// Projected percentage after n simulated classes: every simulated class adds a
+// conducted hour; attending (n > 0) adds an attended hour on top.
+function bunkProjected(row, n) {
+  const attended = num(row.attended) + Math.max(0, n);
+  const conducted = num(row.conducted) + Math.abs(n);
+  return conducted > 0 ? (attended / conducted) * 100 : null;
+}
+
+function simOutHTML(p) {
+  return p == null ? "" : `projected <b class="sim-pct ${pctClass(p)}">${p.toFixed(1)}%</b>`;
+}
+
+// Compact simulator row under a component row. Fixed min-height, so stepping
+// never shifts layout; the projection fills in on the first step.
+function bunkSimHTML(gi, ri, row) {
+  const n = bunkSims.get(`${gi}:${ri}`) || 0;
+  const p = n === 0 ? null : bunkProjected(row, n);
+  return `<div class="bunk-sim" data-sim-course="${gi}" data-sim-row="${ri}">
+    <span class="sim-label">simulate</span>
+    <button type="button" class="sim-btn" data-sim="-1" aria-label="Simulate missing one more class"><i data-lucide="minus"></i></button>
+    <button type="button" class="sim-btn" data-sim="1" aria-label="Simulate attending one more class"><i data-lucide="plus"></i></button>
+    <span class="sim-out" aria-live="polite">${simOutHTML(p)}</span>
+  </div>`;
+}
+
 function renderAttendance() {
   const rows = state.attendance || [];
   const sumBox = $("#attendance-summary");
@@ -1783,6 +1852,10 @@ function renderAttendance() {
     setHTML(box, emptyState("No attendance records", "Nothing to show for this term yet.", "chart-column"));
     return;
   }
+
+  // Fresh data (reload, term switch, revalidate) resets every simulation.
+  const sig = JSON.stringify(rows.map((r) => [r.course_code, r.type, r.attended, r.conducted]));
+  if (sig !== bunkSig) { bunkSig = sig; bunkSims.clear(); }
 
   const groups = attendanceGroups();
 
@@ -1811,6 +1884,7 @@ function renderAttendance() {
       <div class="course-head">
         <div class="course-code">${esc(g.code)}</div>
         <div class="course-name">${esc(g.name || g.code)}</div>
+        ${headChipsHTML(g)}
       </div>
       <div class="course-overall">
         <div class="co-left">
@@ -1829,7 +1903,7 @@ function renderAttendance() {
             <span class="cmp-frac">${esc(r.attended)}/${esc(r.conducted)} hrs · ${esc(r.absent)} absent</span>
             ${bunkHint(r)}
           </span>
-        </button>`;
+        </button>${bunkSimHTML(gi, ri, r)}`;
       }).join("") + `</div>
     </div>`;
   });
@@ -1857,6 +1931,7 @@ async function openRegisterDetail(row) {
       html += `<div class="kv-row"><span class="kv-key">${esc(k)}</span><span class="kv-val">${esc(v)}</span></div>`;
     }
     html += `</div><div class="modal-section-title">Day-by-day</div>`;
+    html += trendSparkline(days);
     if (days.length === 0) {
       html += emptyState("No daily records", "No register entries found.", "notebook-pen");
     } else {
@@ -1874,6 +1949,57 @@ async function openRegisterDetail(row) {
     } else closeModal();
   }
 }
+
+// Cumulative attendance % after each P/A register entry ("-" rows skipped) as
+// a compact SVG sparkline with a dashed 75% reference line. Returns "" when
+// there aren't at least two points to draw — the modal skips it silently.
+function trendSparkline(days) {
+  const pts = [];
+  let attended = 0, conducted = 0;
+  for (const d of days) {
+    if (d.status !== "P" && d.status !== "A") continue;
+    conducted++;
+    if (d.status === "P") attended++;
+    pts.push((attended / conducted) * 100);
+  }
+  if (pts.length < 2) return "";
+  const W = 280, H = 56, PAD = 5;
+  const lo = Math.max(0, Math.min(...pts, 75) - 3);
+  const hi = Math.min(100, Math.max(...pts, 75) + 3);
+  const span = hi - lo || 1;
+  const x = (i) => PAD + (i / (pts.length - 1)) * (W - 2 * PAD);
+  const y = (v) => H - PAD - ((v - lo) / span) * (H - 2 * PAD);
+  const line = pts.map((p, i) => `${x(i).toFixed(1)},${y(p).toFixed(1)}`).join(" ");
+  const area = `${PAD},${H - PAD} ${line} ${W - PAD},${H - PAD}`;
+  const y75 = y(75).toFixed(1);
+  const lx = x(pts.length - 1).toFixed(1);
+  const ly = y(pts[pts.length - 1]).toFixed(1);
+  return `<div class="trend-wrap">
+    <svg class="trend-spark" viewBox="0 0 ${W} ${H}" role="img" aria-label="Attendance trend over the semester">
+      <polygon class="trend-area" points="${area}"></polygon>
+      <line class="trend-ref" x1="${PAD}" y1="${y75}" x2="${W - PAD}" y2="${y75}"></line>
+      <polyline class="trend-line" points="${line}"></polyline>
+      <circle class="trend-dot" cx="${lx}" cy="${ly}" r="3.2"></circle>
+    </svg>
+    <div class="trend-cap">trend over the semester · 75% line</div>
+  </div>`;
+}
+
+// Bunk simulator steppers: update only the projected label in place (no
+// re-render, no layout shift). Sims live in bunkSims and reset on data reload.
+$("#attendance-content").addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-sim]");
+  if (!btn) return;
+  const wrap = btn.closest("[data-sim-course]");
+  const gi = +wrap.dataset.simCourse, ri = +wrap.dataset.simRow;
+  const row = (attendanceGroups()[gi] || { rows: [] }).rows[ri];
+  if (!row) return;
+  const key = `${gi}:${ri}`;
+  const n = (bunkSims.get(key) || 0) + (btn.dataset.sim === "1" ? 1 : -1);
+  bunkSims.set(key, n);
+  const p = n === 0 ? null : bunkProjected(row, n);
+  wrap.querySelector(".sim-out").innerHTML = simOutHTML(p);
+});
 
 /* ---------- Render: Grades ---------- */
 function renderGrades() {
@@ -1950,9 +2076,9 @@ async function openMarksDetail(row) {
 }
 
 /* ---------- Render: Exams ---------- */
-// Tolerant exam-date parsing for the calendar tile: ISO (2026-08-14),
-// dd-mm-yyyy / dd/mm/yyyy, or anything Date.parse understands ("14 Aug 2026").
-function examDateParts(s) {
+// Tolerant exam-date parsing: ISO (2026-08-14), dd-mm-yyyy / dd/mm/yyyy, or
+// anything Date.parse understands ("14 Aug 2026"). Returns a local Date.
+function examDateObj(s) {
   const str = String(s || "").trim();
   if (!str) return null;
   let d = null;
@@ -1970,7 +2096,45 @@ function examDateParts(s) {
     if (!Number.isNaN(t)) d = new Date(t);
   }
   if (!d || Number.isNaN(d.getTime())) return null;
+  return d;
+}
+
+function examDateParts(s) {
+  const d = examDateObj(s);
+  if (!d) return null;
   return { day: d.getDate(), mon: d.toLocaleString(undefined, { month: "short" }) };
+}
+
+// Nearest upcoming exam from the seating plan (today counts, past days don't).
+function nextExam() {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  let best = null;
+  for (const r of state.seating || []) {
+    const raw = examDateObj(r.date);
+    if (!raw) continue;
+    const d = new Date(raw.getFullYear(), raw.getMonth(), raw.getDate());
+    if (d < today) continue;
+    if (!best || d < best.d) best = { d, row: r };
+  }
+  return best;
+}
+
+// Slim countdown strip under the dashboard hero — empty string when the
+// seating plan has no future exam (the strip simply isn't rendered).
+function examCountdownHTML() {
+  const nx = nextExam();
+  if (!nx) return "";
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const days = Math.round((nx.d - today) / 86400000);
+  const when = days === 0 ? "today" : days === 1 ? "tomorrow" : `in ${days}d`;
+  const dp = examDateParts(nx.row.date);
+  const detail = [dp ? `${dp.day} ${dp.mon}` : "", nx.row.room_no].filter(Boolean).join(", ");
+  return `<div class="exam-strip">
+    <i data-lucide="alarm-clock"></i>
+    <span class="exam-strip-text">next exam: <b>${esc(nx.row.course_code)}</b> · ${esc(nx.row.exam_type)} · ${esc(when)}${detail ? ` <span class="exam-strip-sub">(${esc(detail)})</span>` : ""}</span>
+  </div>`;
 }
 
 function renderSeating() {
@@ -2840,6 +3004,14 @@ $("#timetable-content").addEventListener("click", (e) => {
 /* ---------- Init ---------- */
 loadStored();
 loadAiHistory();
+// App-shell service worker: relative URL keeps the scope correct when the app
+// is served from a subpath (e.g. /klu/). Cross-origin API calls and POSTs are
+// never intercepted (see sw.js). Best-effort — unsupported contexts just skip.
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("sw.js").catch(() => { /* offline shell is a bonus */ });
+  });
+}
 // Course titles arrive async — repaint whatever is already on screen once the
 // catalog lands so codes swap to full names without a manual refresh.
 loadCourses().then(() => {

@@ -2562,3 +2562,125 @@ img { max-width: 100%; }
   letter-spacing: 0.08em;
   margin-bottom: 4px;
 }
+
+/* ============ Attendance: bunk simulator + header target chips ============ */
+
+/* "to 75% / to 85%" quick chips in the course header (component totals) */
+.head-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+
+.head-chip {
+  font-family: var(--font-mono);
+  font-size: 0.64rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 4px 9px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  background: var(--panel-2);
+  font-variant-numeric: tabular-nums;
+}
+.head-chip.ok { color: var(--lime); background: var(--lime-soft); border-color: rgba(200, 255, 0, 0.4); }
+.head-chip.mid { color: var(--amber); background: rgba(255, 200, 87, 0.08); border-color: rgba(255, 200, 87, 0.4); }
+.head-chip.warn { color: var(--pink); background: var(--pink-soft); border-color: rgba(255, 46, 99, 0.4); }
+
+/* Compact simulator row under each component row. Fixed min-height whether or
+   not a projection is showing, so stepping never shifts layout. Steppers are
+   44px hit areas with a smaller visual box (compact look, touch-safe). */
+.bunk-sim {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-height: 44px;
+  padding: 0 10px 6px 12px;
+}
+
+.sim-label {
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  margin-right: 6px;
+}
+
+.sim-btn {
+  position: relative;
+  flex: none;
+  width: 44px;
+  height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font: inherit;
+}
+.sim-btn::before {
+  content: "";
+  position: absolute;
+  inset: 8px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.sim-btn svg { position: relative; width: 14px; height: 14px; }
+.sim-btn:hover { color: var(--lime); }
+.sim-btn:hover::before { border-color: var(--lime); }
+.sim-btn:active::before { background: var(--lime-soft); }
+
+.sim-out {
+  margin-left: auto;
+  font-size: 0.74rem;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.sim-pct { font-weight: 800; }
+.sim-pct.pct-good { color: var(--lime); }
+.sim-pct.pct-mid { color: var(--amber); }
+.sim-pct.pct-bad { color: var(--pink); }
+
+/* ============ Register modal: attendance trend sparkline ============ */
+
+.trend-wrap { margin: 2px 0 14px; }
+
+.trend-spark { display: block; width: 100%; height: 56px; }
+
+.trend-area { fill: rgba(200, 255, 0, 0.10); stroke: none; }
+.trend-line { fill: none; stroke: var(--lime); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.trend-ref { fill: none; stroke: var(--text-faint); stroke-width: 1; stroke-dasharray: 4 4; }
+.trend-dot { fill: var(--lime); stroke: none; }
+
+.trend-cap {
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  margin-top: 6px;
+}
+
+/* ============ Dashboard: next-exam countdown strip ============ */
+
+.exam-strip {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--lime);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+  margin: calc(-1 * var(--sp-2)) 0 var(--sp-5);
+  box-shadow: var(--shadow-card);
+}
+.exam-strip > svg { width: 18px; height: 18px; color: var(--lime); flex: none; }
+.exam-strip-text { font-size: 0.82rem; color: var(--text-dim); min-width: 0; overflow-wrap: break-word; }
+.exam-strip-text b { color: var(--text); font-weight: 800; }
+.exam-strip-sub { color: var(--text-faint); }
