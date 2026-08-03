@@ -171,6 +171,7 @@ img { max-width: 100%; }
 /* ============ Login ============ */
 
 #login-screen {
+  position: relative;
   min-height: 100vh;
   min-height: 100dvh;
   display: flex;
@@ -184,7 +185,47 @@ img { max-width: 100%; }
   background-size: 44px 44px;
 }
 
+/* Slow-drifting purple glow behind the card (decorative, CSS-only) */
+#login-screen::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(420px 420px at 22% 28%, rgba(124, 92, 252, 0.16), transparent 70%),
+    radial-gradient(340px 340px at 78% 72%, rgba(200, 255, 0, 0.05), transparent 70%);
+  background-repeat: no-repeat;
+  animation: loginGlow 16s ease-in-out infinite alternate;
+  pointer-events: none;
+}
+
+/* Faint lime scanline sweeping top to bottom. position:fixed so the sweep
+   never expands the page's scrollable area (the card stays scrollable on
+   short viewports). */
+#login-screen::after {
+  content: "";
+  position: fixed;
+  left: 0;
+  right: 0;
+  top: -140px;
+  height: 140px;
+  background: linear-gradient(180deg, transparent, rgba(200, 255, 0, 0.045), transparent);
+  animation: loginScan 11s linear infinite;
+  pointer-events: none;
+}
+
+@keyframes loginGlow {
+  from { background-position: 0 0, 0 0; }
+  to { background-position: 6vw 4vh, -5vw -5vh; }
+}
+
+@keyframes loginScan {
+  from { transform: translateY(0); }
+  to { transform: translateY(calc(100vh + 280px)); }
+}
+
 .login-card {
+  position: relative;
+  z-index: 1;
   width: 100%;
   max-width: 420px;
   background: var(--panel);
@@ -352,7 +393,7 @@ img { max-width: 100%; }
   letter-spacing: 0.08em;
   text-transform: uppercase;
   padding: 6px 2px;
-  transition: color 0.15s ease;
+  transition: color 0.18s ease, background-color 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
 }
 
 .nav-btn svg { width: 20px; height: 20px; }
@@ -384,6 +425,15 @@ img { max-width: 100%; }
 
 @keyframes fadeUp {
   from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* Staggered card entrance — setHTML tags direct children of the tab content
+   boxes with .rise plus an incremental animation-delay (45ms steps) */
+.rise { animation: riseIn 0.34s ease both; }
+
+@keyframes riseIn {
+  from { opacity: 0; transform: translateY(10px); }
   to { opacity: 1; transform: translateY(0); }
 }
 
@@ -600,6 +650,9 @@ img { max-width: 100%; }
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 14px var(--sp-4);
+  /* Grid item: allow shrinking below min-content so long course titles wrap
+     instead of pushing the row past its track on narrow screens */
+  min-width: 0;
 }
 
 .class-row.now { border-color: var(--lime); box-shadow: 4px 4px 0 var(--purple); }
@@ -644,6 +697,9 @@ img { max-width: 100%; }
 
 .cr-meta { display: block; color: var(--text-dim); font-size: 0.78rem; margin-top: 3px; }
 
+/* Dim mono variant for the "code · section · room" line under a course title */
+.cr-mono { font-family: var(--font-mono); font-size: 0.72rem; letter-spacing: 0.02em; }
+
 .cr-now {
   margin-left: auto;
   flex: none;
@@ -682,6 +738,7 @@ img { max-width: 100%; }
   font-size: 0.76rem;
   letter-spacing: 0.1em;
   text-transform: uppercase;
+  transition: background 0.18s ease, color 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
 }
 
 .day-pill:hover { color: var(--text); border-color: var(--text-faint); }
@@ -745,10 +802,16 @@ img { max-width: 100%; }
   border-radius: var(--radius);
   padding: var(--sp-4);
   box-shadow: var(--shadow-card);
-  transition: background 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
+  transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
 }
 .card-btn:hover { background: var(--panel-2); }
 .card-btn:active { transform: translate(2px, 2px); }
+
+/* Desktop hover: clickable cards lift 2px and the hard shadow grows 2px */
+@media (hover: hover) and (min-width: 768px) {
+  .card-btn:hover { transform: translate(-2px, -2px); box-shadow: 7px 7px 0 #15151a; }
+  .task-row:hover { transform: translateY(-2px); box-shadow: 5px 5px 0 #15151a; }
+}
 
 .grid-hint {
   color: var(--text-faint);
@@ -1445,10 +1508,14 @@ img { max-width: 100%; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;
+    animation-delay: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+    transition-delay: 0.01ms !important;
     scroll-behavior: auto !important;
   }
+  /* Login screen accents off entirely */
+  #login-screen::before, #login-screen::after { animation: none !important; }
 }
 
 /* ============ Plan tab: free hours, blocks, goals, tasks ============ */
@@ -1564,7 +1631,7 @@ img { max-width: 100%; }
   padding: 12px var(--sp-3) 12px var(--sp-4);
   min-height: 44px;
   cursor: pointer;
-  transition: background 0.15s ease;
+  transition: background 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
 }
 .task-row:hover { background: var(--panel-2); }
 

@@ -910,7 +910,7 @@ async def ai_chat(
         system_prompt += "\n\nSTUDENT CONTEXT:\n" + context
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(_parse_history(history))
-    messages.append({"role": "user", "content": message[:2000]})
+    messages.append({"role": "user", "content": message[:4000]})
 
     try:
         async with httpx.AsyncClient(verify=True, timeout=45) as client:
@@ -921,7 +921,7 @@ async def ai_chat(
                     "model": KIMI_MODEL,
                     "messages": messages,
                     # kimi-k2.5 rejects any temperature other than 1 — omit it.
-                    "max_tokens": 2000,
+                    "max_tokens": 4000,
                 },
             )
             r.raise_for_status()

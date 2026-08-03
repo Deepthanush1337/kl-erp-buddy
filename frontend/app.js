@@ -15,6 +15,7 @@ const state = {
   creds: null,          // {username, password}
   cookies: null,        // {PHPSESSID, kl_erp_device_id, SERVERID, _csrf_token, _csrf}
   profile: null,        // {name, roll_no, department} from /login or /fetch-profile
+  courses: {},          // course code -> {t: full title, a: acronym} from courses.json
   timetable: null,      // raw timetable object
   attendance: null,     // array
   grades: null,         // array
@@ -59,10 +60,29 @@ function refreshIcons() {
 }
 
 // Every dynamic markup injection goes through here so icons are always re-rendered.
+// Direct children of the main content boxes also get a staggered fade-and-rise
+// entrance (.rise + incremental delay). Skeletons are skipped so their shimmer
+// keeps sweeping; the whole effect is off under prefers-reduced-motion.
+const STAGGER_BOXES = new Set([
+  "dashboard-content", "timetable-content", "attendance-summary", "attendance-content",
+  "plan-content", "grades-summary", "grades-content", "exams-content", "ai-content",
+]);
+const REDUCE_MOTION = typeof window.matchMedia === "function" &&
+  window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
 function setHTML(target, html) {
   const el = typeof target === "string" ? $(target) : target;
   el.innerHTML = html;
   refreshIcons();
+  if (!REDUCE_MOTION && el.id && STAGGER_BOXES.has(el.id)) {
+    let i = 0;
+    for (const child of el.children) {
+      if (child.classList.contains("skeleton")) continue;
+      child.classList.add("rise");
+      child.style.animationDelay = `${Math.min(i, 8) * 45}ms`;
+      i++;
+    }
+  }
 }
 
 /* ---------- Toasts ---------- */
@@ -134,41 +154,42 @@ const MOCK_MODE = new URLSearchParams(location.search).has("mock");
 
 // One row per course COMPONENT (type = L/T/P/S), matching the real API shape;
 // multiple rows share a course_code + course_name and get grouped in the UI.
+// Codes are real entries from courses.json so course titles resolve in mock mode.
 const MOCK_ATTENDANCE = [
-  { course_name: "Data Structures and Algorithms", course_code: "24CS2101", type: "L", section: "S-35", conducted: 30, attended: 28, absent: 2, percentage: "93.33", register_href: "mock" },
-  { course_name: "Data Structures and Algorithms", course_code: "24CS2101", type: "P", section: "S-35", conducted: 12, attended: 11, absent: 1, percentage: "91.67", register_href: "mock" },
-  { course_name: "Operating Systems", course_code: "24CS3102", type: "L", section: "S-35", conducted: 28, attended: 24, absent: 4, percentage: "85.71", register_href: "mock" },
-  { course_name: "Operating Systems", course_code: "24CS3102", type: "T", section: "S-35", conducted: 12, attended: 11, absent: 1, percentage: "91.67", register_href: "mock" },
-  { course_name: "Database Management Systems", course_code: "24CS2103", type: "L", section: "S-36", conducted: 26, attended: 21, absent: 5, percentage: "80.77", register_href: "mock" },
-  { course_name: "Computer Networks", course_code: "24CS3104", type: "L", section: "S-35", conducted: 24, attended: 15, absent: 9, percentage: "62.50", register_href: "mock" },
-  { course_name: "Computer Networks", course_code: "24CS3104", type: "P", section: "S-35", conducted: 12, attended: 9, absent: 3, percentage: "75.00", register_href: "mock" },
-  { course_name: "Computer Networks", course_code: "24CS3104", type: "S", section: "S-35-B", conducted: 8, attended: 2, absent: 6, percentage: "25.00", register_href: "mock" },
-  { course_name: "Professional Communication Skills", course_code: "24HS1101", type: "L", section: "S-37", conducted: 30, attended: 26, absent: 4, percentage: "86.67", register_href: "mock" },
+  { course_name: "Data Structures & Algorithms – 1", course_code: "26SC1203", type: "L", section: "S-35", conducted: 30, attended: 28, absent: 2, percentage: "93.33", register_href: "mock" },
+  { course_name: "Data Structures & Algorithms – 1", course_code: "26SC1203", type: "P", section: "S-35", conducted: 12, attended: 11, absent: 1, percentage: "91.67", register_href: "mock" },
+  { course_name: "Operating Systems & Systems Programming", course_code: "26CS2101", type: "L", section: "S-35", conducted: 28, attended: 24, absent: 4, percentage: "85.71", register_href: "mock" },
+  { course_name: "Operating Systems & Systems Programming", course_code: "26CS2101", type: "T", section: "S-35", conducted: 12, attended: 11, absent: 1, percentage: "91.67", register_href: "mock" },
+  { course_name: "Full Stack Development – Database Systems & Back End", course_code: "26SC1307", type: "L", section: "S-36", conducted: 26, attended: 21, absent: 5, percentage: "80.77", register_href: "mock" },
+  { course_name: "Computer Networks & Network Programming", course_code: "26CS2203", type: "L", section: "S-35", conducted: 24, attended: 15, absent: 9, percentage: "62.50", register_href: "mock" },
+  { course_name: "Computer Networks & Network Programming", course_code: "26CS2203", type: "P", section: "S-35", conducted: 12, attended: 9, absent: 3, percentage: "75.00", register_href: "mock" },
+  { course_name: "Computer Networks & Network Programming", course_code: "26CS2203", type: "S", section: "S-35-B", conducted: 8, attended: 2, absent: 6, percentage: "25.00", register_href: "mock" },
+  { course_name: "Communication Skills for Engineers", course_code: "26UC1204", type: "L", section: "S-37", conducted: 30, attended: 26, absent: 4, percentage: "86.67", register_href: "mock" },
 ];
 
 const MOCK_GRADES = [
-  { course_name: "Mathematics I", course_code: "24MT1101", academic_year: "2024-25", semester: "Odd", credits: 4, grade: "O", grade_point: 10, target_href: "mock" },
-  { course_name: "Programming for Problem Solving", course_code: "24CS1101", academic_year: "2024-25", semester: "Odd", credits: 4, grade: "S", grade_point: 9, target_href: "mock" },
-  { course_name: "Engineering Physics", course_code: "24PH1102", academic_year: "2024-25", semester: "Odd", credits: 3, grade: "A", grade_point: 8, target_href: "mock" },
-  { course_name: "Basic Electrical Engineering", course_code: "24EE1101", academic_year: "2024-25", semester: "Odd", credits: 3, grade: "B", grade_point: 7, target_href: "mock" },
-  { course_name: "Environmental Science", course_code: "24ES1101", academic_year: "2024-25", semester: "Even", credits: 2, grade: "C", grade_point: 6, target_href: "mock" },
-  { course_name: "Workshop Practice", course_code: "24ME1181", academic_year: "2024-25", semester: "Even", credits: 2, grade: "A", grade_point: 8, target_href: "mock" },
+  { course_name: "Mathematics for Computation", course_code: "26MT1101", academic_year: "2026-27", semester: "Odd", credits: 4, grade: "O", grade_point: 10, target_href: "mock" },
+  { course_name: "Problem Solving Using Programming (Java)", course_code: "26SC1101", academic_year: "2026-27", semester: "Odd", credits: 4, grade: "S", grade_point: 9, target_href: "mock" },
+  { course_name: "Digital Design & Computer Architecture", course_code: "26EC1202", academic_year: "2026-27", semester: "Odd", credits: 3, grade: "A", grade_point: 8, target_href: "mock" },
+  { course_name: "Fundamentals of IoT & Sensors", course_code: "26EC1101", academic_year: "2026-27", semester: "Odd", credits: 3, grade: "B", grade_point: 7, target_href: "mock" },
+  { course_name: "Ecology & Environment", course_code: "26UC0009", academic_year: "2026-27", semester: "Even", credits: 2, grade: "C", grade_point: 6, target_href: "mock" },
+  { course_name: "Mechanical Engineering Workshop", course_code: "26ME1101", academic_year: "2026-27", semester: "Even", credits: 2, grade: "A", grade_point: 8, target_href: "mock" },
 ];
 
 const MOCK_SEATING = [
-  { date: "12-08-2026", course_code: "24CS2101", university_id: "2600031735", exam_type: "Mid Semester", time_slot: "09:00 - 11:00", room_no: "S708" },
-  { date: "14-08-2026", course_code: "24CS3102", university_id: "2600031735", exam_type: "Mid Semester", time_slot: "13:00 - 15:00", room_no: "R412" },
-  { date: "18-08-2026", course_code: "24CS2103", university_id: "2600031735", exam_type: "Quiz", time_slot: "09:00 - 10:00", room_no: "C305" },
+  { date: "12-08-2026", course_code: "26SC1203", university_id: "2600031735", exam_type: "Mid Semester", time_slot: "09:00 - 11:00", room_no: "S708" },
+  { date: "14-08-2026", course_code: "26CS2101", university_id: "2600031735", exam_type: "Mid Semester", time_slot: "13:00 - 15:00", room_no: "R412" },
+  { date: "18-08-2026", course_code: "26SC1307", university_id: "2600031735", exam_type: "Quiz", time_slot: "09:00 - 10:00", room_no: "C305" },
 ];
 
 // Day keys -> slot number -> raw ERP cell text. Identical text in consecutive
 // slots exercises the merged-block logic (e.g. Mon slots 3-4 become one block).
 const MOCK_TIMETABLE = {
-  Mon: { 3: "24CS2101-L - S-35 -RoomNo-C618", 4: "24CS2101-L - S-35 -RoomNo-C618", 5: "24CS3102-L - S-35 -RoomNo-R209C", 7: "24CS3102-L - S-35 -RoomNo-R209C", 8: "24CS3181-P - S-35 -RoomNo-L615", 9: "24CS3181-P - S-35 -RoomNo-L615", 10: "24HS1101-L - S-35 -RoomNo-R404A", 11: "24HS1101-L - S-35 -RoomNo-R404A" },
-  Tue: { 1: "24CS2103-L - S-36 -RoomNo-C505", 2: "24CS2103-L - S-36 -RoomNo-C505", 9: "24CS3104-L - S-35 -RoomNo-R310" },
-  Wed: { 3: "24CS3104-L - S-35 -RoomNo-R310", 4: "24CS3104-L - S-35 -RoomNo-R310", 6: "24CS2101-L - S-35 -RoomNo-C618" },
-  Thu: { 5: "24HS1101-L - S-35 -RoomNo-R404A", 7: "24CS2103-L - S-36 -RoomNo-C505", 8: "24CS2103-L - S-36 -RoomNo-C505" },
-  Fri: { 3: "24CS3102-L - S-35 -RoomNo-R209C", 10: "24CS3181-P - S-35 -RoomNo-L615", 11: "24CS3181-P - S-35 -RoomNo-L615" },
+  Mon: { 3: "26SC1203-L - S-35 -RoomNo-C618", 4: "26SC1203-L - S-35 -RoomNo-C618", 5: "26CS2101-L - S-35 -RoomNo-R209C", 7: "26CS2101-L - S-35 -RoomNo-R209C", 8: "26SC1203-P - S-35 -RoomNo-L615", 9: "26SC1203-P - S-35 -RoomNo-L615", 10: "26UC1204-L - S-35 -RoomNo-R404A", 11: "26UC1204-L - S-35 -RoomNo-R404A" },
+  Tue: { 1: "26SC1307-L - S-36 -RoomNo-C505", 2: "26SC1307-L - S-36 -RoomNo-C505", 9: "26CS2203-L - S-35 -RoomNo-R310" },
+  Wed: { 3: "26CS2203-L - S-35 -RoomNo-R310", 4: "26CS2203-L - S-35 -RoomNo-R310", 6: "26SC1203-L - S-35 -RoomNo-C618" },
+  Thu: { 5: "26UC1204-L - S-35 -RoomNo-R404A", 7: "26SC1307-L - S-36 -RoomNo-C505", 8: "26SC1307-L - S-36 -RoomNo-C505" },
+  Fri: { 3: "26CS2101-L - S-35 -RoomNo-R209C", 10: "26SC1203-P - S-35 -RoomNo-L615", 11: "26SC1203-P - S-35 -RoomNo-L615" },
   Sat: {},
   Sun: {},
 };
@@ -200,19 +221,19 @@ function mockApiResponse(path) {
 function mockPlanData() {
   return {
     tasks: [
-      { id: "mock-t1", title: "DSA assignment 4 — graph traversals", course: "24CS2101", due_date: shiftISO(-1), priority: 2, done: false },
-      { id: "mock-t2", title: "OS lab record submission", course: "24CS3102", due_date: shiftISO(0), priority: 1, done: false },
-      { id: "mock-t3", title: "CN quiz prep — subnetting", course: "24CS3104", due_date: shiftISO(3), priority: 0, done: false },
-      { id: "mock-t4", title: "Print DBMS notes", course: "24CS2103", due_date: shiftISO(-2), priority: 0, done: true },
+      { id: "mock-t1", title: "DSA assignment 4 — graph traversals", course: "26SC1203", due_date: shiftISO(-1), priority: 2, done: false },
+      { id: "mock-t2", title: "OS lab record submission", course: "26CS2101", due_date: shiftISO(0), priority: 1, done: false },
+      { id: "mock-t3", title: "CN quiz prep — subnetting", course: "26CS2203", due_date: shiftISO(3), priority: 0, done: false },
+      { id: "mock-t4", title: "Print DBMS notes", course: "26SC1307", due_date: shiftISO(-2), priority: 0, done: true },
     ],
     blocks: [
-      { id: "mock-b1", course: "24CS2101", day: shiftISO(0), start_time: "18:00", end_time: "19:30", note: "Graph problem set", done: false },
-      { id: "mock-b2", course: "24CS3104", day: shiftISO(0), start_time: "20:00", end_time: "21:00", note: "Subnetting drills", done: true },
-      { id: "mock-b3", course: "24CS3102", day: shiftISO(1), start_time: "17:30", end_time: "18:30", note: "Lab record", done: false },
+      { id: "mock-b1", course: "26SC1203", day: shiftISO(0), start_time: "18:00", end_time: "19:30", note: "Graph problem set", done: false },
+      { id: "mock-b2", course: "26CS2203", day: shiftISO(0), start_time: "20:00", end_time: "21:00", note: "Subnetting drills", done: true },
+      { id: "mock-b3", course: "26CS2101", day: shiftISO(1), start_time: "17:30", end_time: "18:30", note: "Lab record", done: false },
     ],
     goals: [
-      { course: "24CS2101", weekly_hours: 5 },
-      { course: "24CS3104", weekly_hours: 3 },
+      { course: "26SC1203", weekly_hours: 5 },
+      { course: "26CS2203", weekly_hours: 3 },
     ],
   };
 }
@@ -302,6 +323,37 @@ function parseSlot(text) {
   let room = parts.slice(2).join(" - ") || "";
   room = room.replace(/^RoomNo-?/i, "").trim();
   return { code, section, room };
+}
+
+/* ---------- Course catalog (courses.json) ---------- */
+// Map of KL course code -> {t: full title, a: acronym} covering the 2026 batch
+// catalog. Fetched once at startup; a missing/failed fetch leaves an empty map
+// and the app simply keeps showing raw codes.
+async function loadCourses() {
+  try {
+    const res = await fetch("courses.json");
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    state.courses = data && typeof data === "object" && !Array.isArray(data) ? data : {};
+  } catch { state.courses = {}; }
+}
+
+// Slot codes carry a component suffix ("26UC1137-P") — strip it (same rule as
+// knownCourses) and look the base code up in the catalog.
+// Returns {title, acronym, base} or null when the code is unknown.
+function courseInfo(code) {
+  const raw = String(code || "").trim();
+  if (!raw) return null;
+  const base = raw.replace(/-[A-Za-z]$/, "");
+  const hit = state.courses[base];
+  if (!hit || !hit.t) return null;
+  return { title: String(hit.t), acronym: String(hit.a || ""), base };
+}
+
+// "26UC1137 (Design Thinking for Innovation & Entrepreneurship)" — AI context.
+function courseLabel(code) {
+  const ci = courseInfo(code);
+  return ci ? `${ci.base} (${ci.title})` : String(code || "");
 }
 
 const DAY_KEYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
@@ -747,8 +799,13 @@ function slotLabel(b) {
 }
 
 // Shared row markup (dashboard "today" list + week day view): big lime start
-// time + dim end + slot label on the left, class details on the right.
+// time + dim end + slot label on the left, class details on the right. When the
+// course is in the catalog the full title leads and the raw code drops into the
+// dim mono meta line; unknown codes stay as the title like before.
 function classRowHTML(b, isNow) {
+  const ci = courseInfo(b.code);
+  const meta = [ci ? b.code : "", b.section, b.room ? "Room " + b.room : ""]
+    .filter(Boolean).join(" · ");
   return `<div class="class-row${isNow ? " now" : ""}">
     <div class="cr-time">
       <span class="cr-start">${b.start}</span>
@@ -756,8 +813,8 @@ function classRowHTML(b, isNow) {
       <span class="cr-slot">${slotLabel(b)}</span>
     </div>
     <div class="cr-info">
-      <span class="cr-code">${esc(b.code)}</span>
-      <span class="cr-meta">${esc(b.section)}${b.room ? " · Room " + esc(b.room) : ""}</span>
+      <span class="cr-code">${esc(ci ? ci.title : b.code)}</span>
+      <span class="cr-meta cr-mono">${esc(meta)}</span>
     </div>
     ${isNow ? `<span class="cr-now">Now</span>` : ""}
   </div>`;
@@ -771,18 +828,22 @@ function fmtDuration(mins) {
 }
 
 // Hero banner: current class (pulsing) / next class (with countdown) / all done
-// for the day / nothing scheduled at all.
+// for the day / nothing scheduled at all. Title-first like the class rows.
 function classHero(blocks) {
   const mins = nowMinutes();
   for (const b of blocks) {
     const s = timeToMin(b.start), e = timeToMin(b.end);
+    const ci = courseInfo(b.code);
+    const title = ci ? ci.title : b.code;
+    const sub = [ci ? b.code : "", b.section, b.room ? "Room " + b.room : "", slotLabel(b)]
+      .filter(Boolean).join(" · ");
     if (mins >= s && mins < e) {
       return `<div class="dash-hero now">
         <span class="hero-dot" aria-hidden="true"></span>
         <div class="hero-text">
           <span class="hero-eyebrow">In class now · ends ${b.end}</span>
-          <span class="hero-title">${esc(b.code)}</span>
-          <span class="hero-sub">${esc(b.section)}${b.room ? " · Room " + esc(b.room) : ""} · ${slotLabel(b)}</span>
+          <span class="hero-title">${esc(title)}</span>
+          <span class="hero-sub">${esc(sub)}</span>
         </div></div>`;
     }
     if (mins < s) {
@@ -790,8 +851,8 @@ function classHero(blocks) {
         <i data-lucide="clock"></i>
         <div class="hero-text">
           <span class="hero-eyebrow">Up next · in ${fmtDuration(s - mins)}</span>
-          <span class="hero-title">${esc(b.code)} <span class="hero-at">${b.start}</span></span>
-          <span class="hero-sub">${esc(b.section)}${b.room ? " · Room " + esc(b.room) : ""} · ${slotLabel(b)}</span>
+          <span class="hero-title">${esc(title)} <span class="hero-at">${b.start}</span></span>
+          <span class="hero-sub">${esc(sub)}</span>
         </div></div>`;
     }
   }
@@ -1189,7 +1250,8 @@ function freeSlotsToday() {
 }
 
 // Courses for the dropdowns: timetable slot codes (type suffix stripped) plus
-// attendance course codes, deduped; names from attendance when known.
+// attendance course codes, deduped. Display names come from attendance (ERP)
+// when known, otherwise from the courses.json catalog (see courseOptions).
 function knownCourses() {
   const map = new Map();
   for (const r of state.attendance || []) {
@@ -1212,7 +1274,9 @@ function knownCourses() {
 function courseOptions({ includeNone = false, includeOther = false } = {}) {
   let html = includeNone ? `<option value="">No course</option>` : "";
   for (const [code, name] of knownCourses()) {
-    html += `<option value="${esc(code)}">${esc(code)}${name ? " — " + esc(name) : ""}</option>`;
+    const ci = courseInfo(code);
+    const label = name || (ci ? ci.title : "");
+    html += `<option value="${esc(code)}">${esc(code)}${label ? " — " + esc(label) : ""}</option>`;
   }
   if (includeOther) html += `<option value="Other">Other</option>`;
   return html;
@@ -1335,7 +1399,10 @@ function renderPlan() {
     html += `<div class="day-empty"><div class="empty-title">no blocks planned.</div>
       <div class="empty-sub">Add a study block for this day above.</div></div>`;
   } else {
-    html += `<div class="class-rows">` + dayBlocks.map((b) => `
+    html += `<div class="class-rows">` + dayBlocks.map((b) => {
+      const bci = courseInfo(b.course);
+      const blockMeta = [bci ? b.course : "", b.note].filter(Boolean).join(" · ");
+      return `
       <div class="class-row block-row${b.done ? " done" : ""}">
         <div class="cr-time">
           <span class="cr-start">${esc(hhmm(b.start_time))}</span>
@@ -1343,14 +1410,15 @@ function renderPlan() {
           <span class="cr-slot">${fmtDuration(blockMins(b))}</span>
         </div>
         <div class="cr-info">
-          <span class="cr-code">${esc(b.course || "Other")}</span>
-          ${b.note ? `<span class="cr-meta">${esc(b.note)}</span>` : ""}
+          <span class="cr-code">${esc(bci ? bci.title : (b.course || "Other"))}</span>
+          ${blockMeta ? `<span class="cr-meta">${esc(blockMeta)}</span>` : ""}
         </div>
         <div class="row-actions">
           <button type="button" class="btn-icon row-toggle" data-block-toggle="${esc(b.id)}" aria-label="Toggle done"><i data-lucide="check"></i></button>
           <button type="button" class="btn-icon" data-block-del="${esc(b.id)}" aria-label="Delete block"><i data-lucide="trash-2"></i></button>
         </div>
-      </div>`).join("") + `</div>`;
+      </div>`;
+    }).join("") + `</div>`;
   }
 
   /* --- weekly goals --- */
@@ -1374,10 +1442,11 @@ function renderPlan() {
         .filter((b) => (b.course || "Other") === g.course)
         .reduce((s, b) => s + blockMins(b), 0) / 60;
       const pct = num(g.weekly_hours) > 0 ? Math.min(100, (doneHrs / num(g.weekly_hours)) * 100) : 0;
+      const gci = courseInfo(g.course);
       return `<div class="card goal-row">
         <div class="goal-top">
-          <span class="goal-course">${esc(g.course)}</span>
-          <span class="goal-meta">${doneHrs.toFixed(1)} / ${esc(g.weekly_hours)} h this week</span>
+          <span class="goal-course">${esc(gci ? gci.title : g.course)}</span>
+          <span class="goal-meta">${gci ? esc(g.course) + " · " : ""}${doneHrs.toFixed(1)} / ${esc(g.weekly_hours)} h this week</span>
           <button type="button" class="btn-icon" data-goal-del="${esc(g.course)}" aria-label="Remove goal"><i data-lucide="x"></i></button>
         </div>
         <div class="goal-bar"><div class="goal-fill" style="width:${pct.toFixed(0)}%"></div></div>
@@ -1436,12 +1505,13 @@ function renderPlan() {
           due = `<span class="task-due ${cls}">${esc(t.due_date < today ? "due " + txt : txt)}</span>`;
         }
         const prio = Math.min(2, Math.max(0, num(t.priority)));
+        const tci = t.course ? courseInfo(t.course) : null;
         html += `<div class="task-row${t.done ? " done" : ""}" data-task-toggle="${esc(t.id)}" role="button" tabindex="0">
           <span class="task-check" aria-hidden="true"></span>
           <div class="task-info">
             <span class="task-title">${esc(t.title)}</span>
             <span class="task-meta">
-              ${t.course ? `<span>${esc(t.course)}</span>` : ""}
+              ${t.course ? `<span>${esc(t.course)}${tci ? " · " + esc(tci.title) : ""}</span>` : ""}
               ${due}
               <span class="prio-chip p${prio}">${PRIO_LABELS[prio]}</span>
             </span>
@@ -1697,7 +1767,7 @@ function buildAiContext() {
   if (who) lines.push(`Student: ${who}`);
   const blocks = todaysBlocks();
   lines.push(blocks.length
-    ? "Today's classes: " + blocks.map((b) => `${b.code} ${b.start}-${b.end}`).join(", ")
+    ? "Today's classes: " + blocks.map((b) => `${courseLabel(b.code)} ${b.start}-${b.end}`).join(", ")
     : "No classes today.");
   if (state.attendance && state.attendance.length) {
     const g = new Map();
@@ -1708,7 +1778,7 @@ function buildAiContext() {
       g.set(k, cur);
     }
     const parts = [];
-    for (const [k, v] of g) parts.push(`${k} ${v.c ? Math.round((v.a / v.c) * 100) + "%" : "—"}`);
+    for (const [k, v] of g) parts.push(`${courseLabel(k)} ${v.c ? Math.round((v.a / v.c) * 100) + "%" : "—"}`);
     lines.push("Attendance: " + parts.join(", "));
   }
   const open = (state.planTasks || []).filter((t) => !t.done);
@@ -1717,7 +1787,7 @@ function buildAiContext() {
   const free = freeSlotsToday();
   if (free.length) lines.push("Free slots today: " + free.map((f) => `${f.start}-${f.end}`).join(", "));
   let s = lines.join("\n");
-  if (s.length > 800) s = s.slice(0, 797) + "...";
+  if (s.length > 1000) s = s.slice(0, 997) + "..."; // titles make lines longer — keep the free-slots line intact
   return s;
 }
 
@@ -1824,6 +1894,14 @@ $("#timetable-content").addEventListener("click", (e) => {
 /* ---------- Init ---------- */
 loadStored();
 loadAiHistory();
+// Course titles arrive async — repaint whatever is already on screen once the
+// catalog lands so codes swap to full names without a manual refresh.
+loadCourses().then(() => {
+  if (!state.creds || !state.cookies) return; // still on the login screen
+  renderDashboard();
+  if (state.timetable) renderTimetable();
+  if (state.planLoaded) renderPlan();
+});
 if (state.creds && state.cookies) {
   showApp();
 } else {
