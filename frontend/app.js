@@ -153,6 +153,7 @@ function clearSession() {
   state.planTasks = null; state.planBlocks = null; state.planGoals = null;
   state.planDay = null; state.planLoaded = false;
   state.aiStatus = null; state.aiSending = false;
+  state.aiHistory = []; // stored histories stay on disk — other accounts keep theirs
 }
 
 /* ---------- SWR data cache (stale-while-revalidate) ---------- */
@@ -789,6 +790,7 @@ function showApp() {
   $("#login-screen").classList.add("hidden");
   $("#app-screen").classList.remove("hidden");
   renderGreeting();
+  loadAiHistory(); // restore this account's chat log (login + session restore)
   // Eyebrow line: "TODAY · SUN, AUG 2" (CSS uppercases it)
   const now = new Date();
   const wd = now.toLocaleDateString(undefined, { weekday: "short" });
@@ -1751,6 +1753,98 @@ function renderTimetable() {
   setHTML(box, html);
 }
 
+/* ---------- Timetable: calendar export (.ics) ---------- */
+// One VEVENT per merged class block per weekday, repeating weekly for a
+// 16-week semester window starting the current week's Monday. Times are
+// floating local (no TZ suffix) so calendar apps place them in the device zone.
+const ICS_COMP_TYPES = { L: "Lecture", T: "Tutorial", P: "Practical", S: "Skill" };
+
+function p2(n) { return String(n).padStart(2, "0"); }
+
+// RFC5545 text escaping: backslash first, then semicolons, commas, newlines.
+function icsEscape(s) {
+  return String(s == null ? "" : s)
+    .replace(/\\/g, "\\\\")
+    .replace(/;/g, "\\;")
+    .replace(/,/g, "\\,")
+    .replace(/\r?\n/g, "\\n");
+}
+
+function icsUtcStamp(d) {
+  return `${d.getUTCFullYear()}${p2(d.getUTCMonth() + 1)}${p2(d.getUTCDate())}` +
+    `T${p2(d.getUTCHours())}${p2(d.getUTCMinutes())}${p2(d.getUTCSeconds())}Z`;
+}
+
+// "20260803T092000" from a local Date + "HH:MM".
+function icsLocalStamp(d, hhmm) {
+  const [h, m] = String(hhmm).split(":").map(Number);
+  return `${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}T${p2(h)}${p2(m)}00`;
+}
+
+// Slot code suffix -> readable component type ("26SC1203-P" -> "Practical").
+function compTypeLabel(code) {
+  const m = String(code || "").match(/-([A-Za-z])$/);
+  return m ? (ICS_COMP_TYPES[m[1].toUpperCase()] || m[1].toUpperCase()) : "";
+}
+
+function buildTimetableIcs() {
+  if (!state.timetable) return null;
+  const mon = new Date();
+  mon.setDate(mon.getDate() - ((mon.getDay() + 6) % 7)); // this week's Monday
+  const events = [];
+  DAY_KEYS.forEach((day, i) => {
+    const blocks = blocksForDay(day);
+    if (!blocks.length) return;
+    const d = new Date(mon.getFullYear(), mon.getMonth(), mon.getDate() + i);
+    for (const b of blocks) events.push({ d, b });
+  });
+  if (!events.length) return null;
+
+  const lines = [
+    "BEGIN:VCALENDAR",
+    "VERSION:2.0",
+    "PRODID:-//KL ERP Buddy//Timetable//EN",
+    "CALSCALE:GREGORIAN",
+    "METHOD:PUBLISH",
+  ];
+  const stamp = icsUtcStamp(new Date());
+  for (const { d, b } of events) {
+    const ci = courseInfo(b.code);
+    const summary = ci ? `${ci.title} (${ci.base})` : b.code;
+    const desc = [b.section ? "Section " + b.section : "", compTypeLabel(b.code)]
+      .filter(Boolean).join(" · ");
+    lines.push(
+      "BEGIN:VEVENT",
+      `UID:${dateISO(d)}-${b.code}-${b.startSlot}@kl-erp-buddy`,
+      `DTSTAMP:${stamp}`,
+      `DTSTART:${icsLocalStamp(d, b.start)}`,
+      `DTEND:${icsLocalStamp(d, b.end)}`,
+      "RRULE:FREQ=WEEKLY;COUNT=16",
+      `SUMMARY:${icsEscape(summary)}`
+    );
+    if (b.room) lines.push(`LOCATION:${icsEscape(b.room)}`);
+    if (desc) lines.push(`DESCRIPTION:${icsEscape(desc)}`);
+    lines.push("END:VEVENT");
+  }
+  lines.push("END:VCALENDAR");
+  return lines.join("\r\n") + "\r\n";
+}
+
+$("#tt-ics-btn").addEventListener("click", () => {
+  const ics = buildTimetableIcs();
+  if (!ics) { toast("No timetable loaded — nothing to export.", "info"); return; }
+  const blob = new Blob([ics], { type: "text/calendar;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "klu-timetable.ics";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+  toast("Calendar file downloaded", "success");
+});
+
 /* ---------- Render: Attendance ---------- */
 // Component type chip letter: the API sends L/T/P/S etc. (older data may carry
 // full words like "Theory"/"Practical") — either way the first letter is right.
@@ -2001,6 +2095,139 @@ $("#attendance-content").addEventListener("click", (e) => {
   wrap.querySelector(".sim-out").innerHTML = simOutHTML(p);
 });
 
+/* ---------- Grades: what-if CGPA calculator ---------- */
+// Per-course grade pickers for the current term, combined with the completed
+// (already graded) courses into a live projected CGPA. Selections persist per
+// account ("kl_erp_whatif_<username>"); recomputing updates only the output
+// line in place — never a full tab re-render.
+const WHATIF_POINTS = { O: 10, S: 9, A: 8, B: 7, C: 6, D: 5, F: 0 };
+const LS_WHATIF = "kl_erp_whatif";
+
+function whatIfHasGrade(g) { return Object.prototype.hasOwnProperty.call(WHATIF_POINTS, g); }
+
+function whatIfKey() {
+  const u = state.creds && state.creds.username;
+  return u ? `${LS_WHATIF}_${u}` : LS_WHATIF;
+}
+
+function whatIfRead() {
+  try {
+    const d = JSON.parse(localStorage.getItem(whatIfKey()) || "{}");
+    return d && typeof d === "object" && !Array.isArray(d) ? d : {};
+  } catch { return {}; }
+}
+
+// Credits for a course already present in the grades data, else the KL default 4.
+function whatIfKnownCredits(code) {
+  const hit = (state.grades || []).find((r) => r.course_code === code);
+  return hit && num(hit.credits) > 0 ? num(hit.credits) : 4;
+}
+
+// Rows for the card: current-term courses from the attendance data when
+// available, otherwise the latest academic year's graded rows. [] = hide card.
+function whatIfCourses() {
+  const groups = attendanceGroups();
+  if (groups.length) {
+    return groups.map((g) => ({ code: g.code, name: g.name || g.code, credits: whatIfKnownCredits(g.code) }));
+  }
+  const rows = state.grades || [];
+  if (!rows.length) return [];
+  const latest = rows.reduce((max, r) => {
+    const y = String(r.academic_year || "");
+    return y > max ? y : max;
+  }, "");
+  return rows.filter((r) => String(r.academic_year || "") === latest)
+    .map((r) => ({ code: r.course_code, name: r.course_name || r.course_code, credits: whatIfKnownCredits(r.course_code) }));
+}
+
+// Projection over completed courses (graded rows outside the what-if set) plus
+// every what-if row with a picked grade; unpicked rows count as nothing.
+function whatIfProjection() {
+  const courses = whatIfCourses();
+  if (!courses.length) return null;
+  const codes = new Set(courses.map((c) => c.code));
+  const saved = whatIfRead();
+  let gp = 0, cr = 0, completed = 0;
+  for (const r of state.grades || []) {
+    if (codes.has(r.course_code)) continue;
+    gp += num(r.grade_point) * num(r.credits);
+    cr += num(r.credits);
+    completed++;
+  }
+  for (const c of courses) {
+    const s = saved[c.code] || {};
+    const g = String(s.g || "").toUpperCase();
+    if (!whatIfHasGrade(g)) continue;
+    const credits = num(s.c) > 0 ? num(s.c) : c.credits;
+    gp += WHATIF_POINTS[g] * credits;
+    cr += credits;
+  }
+  return { value: cr > 0 ? gp / cr : null, hasCompleted: completed > 0 };
+}
+
+function whatIfPaintOut() {
+  const el = document.getElementById("whatif-out");
+  if (!el) return;
+  const p = whatIfProjection();
+  if (!p) return;
+  el.innerHTML = `${p.hasCompleted ? "projected cgpa" : "projected first-sem sgpa"}: <b>${p.value == null ? "—" : p.value.toFixed(2)}</b>`;
+}
+
+function whatIfCardHTML() {
+  const courses = whatIfCourses();
+  if (!courses.length) return "";
+  const saved = whatIfRead();
+  const gradeOpts = (sel) =>
+    `<option value=""${sel === "" ? " selected" : ""}>&ndash;</option>` +
+    Object.keys(WHATIF_POINTS).map((g) =>
+      `<option value="${g}"${sel === g ? " selected" : ""}>${g}</option>`).join("");
+  const rowsHtml = courses.map((c) => {
+    const s = saved[c.code] || {};
+    const credits = num(s.c) > 0 ? num(s.c) : c.credits;
+    const g = String(s.g || "").toUpperCase();
+    return `<div class="wi-row">
+      <div class="wi-course">
+        <span class="wi-code">${esc(c.code)}</span>
+        <span class="wi-name">${esc(c.name)}</span>
+      </div>
+      <div class="wi-controls">
+        <input type="number" inputmode="decimal" class="wi-credits" data-whatif-credits="${esc(c.code)}" min="0.5" max="30" step="0.5" value="${esc(credits)}" aria-label="Credits for ${esc(c.code)}" />
+        <select class="wi-grade" data-whatif-grade="${esc(c.code)}" aria-label="Expected grade for ${esc(c.code)}">${gradeOpts(whatIfHasGrade(g) ? g : "")}</select>
+      </div>
+    </div>`;
+  }).join("");
+  return `<div class="card whatif-card" id="whatif-card">
+    <span class="wi-eyebrow">calculator</span>
+    <h3 class="wi-title">what-if cgpa<span class="pdot">.</span></h3>
+    <p class="wi-sub">Pick expected grades for this term's courses — the projection updates live and is saved on this device.</p>
+    <div class="wi-rows">${rowsHtml}</div>
+    <div class="wi-out" id="whatif-out" aria-live="polite"></div>
+  </div>`;
+}
+
+// Persist the card's current inputs for this account, then repaint the number.
+function whatIfSaveAndPaint() {
+  const card = document.getElementById("whatif-card");
+  if (!card) return;
+  const data = {};
+  card.querySelectorAll("[data-whatif-credits]").forEach((el) => {
+    (data[el.dataset.whatifCredits] = data[el.dataset.whatifCredits] || {}).c = el.value;
+  });
+  card.querySelectorAll("[data-whatif-grade]").forEach((el) => {
+    (data[el.dataset.whatifGrade] = data[el.dataset.whatifGrade] || {}).g = el.value;
+  });
+  try { localStorage.setItem(whatIfKey(), JSON.stringify(data)); } catch { /* full — session-only */ }
+  whatIfPaintOut();
+}
+
+// input covers typing + spinners, change covers selects on older engines.
+$("#grades-content").addEventListener("input", (e) => {
+  if (e.target.closest("[data-whatif-credits], [data-whatif-grade]")) whatIfSaveAndPaint();
+});
+$("#grades-content").addEventListener("change", (e) => {
+  if (e.target.closest("[data-whatif-credits], [data-whatif-grade]")) whatIfSaveAndPaint();
+});
+
 /* ---------- Render: Grades ---------- */
 function renderGrades() {
   const rows = state.grades || [];
@@ -2009,7 +2236,10 @@ function renderGrades() {
 
   if (rows.length === 0) {
     setHTML(sumBox, "");
-    setHTML(box, emptyState("No results yet", "Grades will appear here once published.", "graduation-cap"));
+    // The what-if card can still render here — it sources current-term courses
+    // from the attendance data even when no grades are published yet.
+    setHTML(box, emptyState("No results yet", "Grades will appear here once published.", "graduation-cap") + whatIfCardHTML());
+    whatIfPaintOut();
     return;
   }
 
@@ -2045,7 +2275,9 @@ function renderGrades() {
     </button>`;
   });
   html += `</div><p class="grid-hint">Tap a course for the full scorecard.</p>`;
+  html += whatIfCardHTML();
   setHTML(box, html);
+  whatIfPaintOut();
 
   box.querySelectorAll("[data-grade-idx]").forEach((el) =>
     el.addEventListener("click", () => openMarksDetail(rows[+el.dataset.gradeIdx])));
@@ -2675,8 +2907,27 @@ function mdToHtml(text) {
   return blocks.join("");
 }
 
+// Per-account history key: each ERP username gets its own chat log on a
+// shared device ("kl_erp_ai_history_<username>"). The bare legacy key is only
+// a fallback while no account is known (pre-login).
+function aiHistoryKey() {
+  const u = state.creds && state.creds.username;
+  return u ? `${LS_AI_HISTORY}_${u}` : LS_AI_HISTORY;
+}
+
 function loadAiHistory() {
-  try { state.aiHistory = JSON.parse(localStorage.getItem(LS_AI_HISTORY) || "[]"); }
+  const key = aiHistoryKey();
+  // One-time migration: a pre-per-account global history is adopted by the
+  // first account that loads with no history of its own, then the legacy key
+  // is deleted so no other account ever inherits it.
+  if (key !== LS_AI_HISTORY && localStorage.getItem(key) == null) {
+    const legacy = localStorage.getItem(LS_AI_HISTORY);
+    if (legacy != null) {
+      try { localStorage.setItem(key, legacy); } catch { /* full — keep in memory */ }
+      localStorage.removeItem(LS_AI_HISTORY);
+    }
+  }
+  try { state.aiHistory = JSON.parse(localStorage.getItem(key) || "[]"); }
   catch { state.aiHistory = []; }
   if (!Array.isArray(state.aiHistory)) state.aiHistory = [];
 }
@@ -2684,7 +2935,7 @@ function loadAiHistory() {
 function pushAi(role, content) {
   state.aiHistory.push({ role, content });
   while (state.aiHistory.length > 20) state.aiHistory.shift();
-  try { localStorage.setItem(LS_AI_HISTORY, JSON.stringify(state.aiHistory)); } catch { /* full — keep in memory */ }
+  try { localStorage.setItem(aiHistoryKey(), JSON.stringify(state.aiHistory)); } catch { /* full — keep in memory */ }
 }
 
 async function loadAi(force) {
@@ -2714,6 +2965,9 @@ function aiBubbleHTML(m) {
 }
 
 function renderAi() {
+  // The clear-chat button mirrors history emptiness on every render.
+  const clearBtn = $("#ai-clear-btn");
+  if (clearBtn) clearBtn.disabled = state.aiHistory.length === 0;
   if (state.activeTab !== "ai") return;
   const box = $("#ai-content");
   if (state.aiStatus !== "on") {
@@ -3003,6 +3257,29 @@ $("#ai-content").addEventListener("click", (e) => {
 // Reopen the personalization overlay (prefilled from existing prefs).
 $("#personalize-btn").addEventListener("click", openOnboarding);
 
+/* --- Clear chat: wipe this account's history, confirmed via the shared modal --- */
+$("#ai-clear-btn").addEventListener("click", () => {
+  if (state.aiHistory.length === 0) return; // button is also disabled — double guard
+  openModal("clear chat.", `
+    <p class="confirm-text">Clear this chat? The saved conversation for this account is wiped from this device — there is no undo.</p>
+    <div class="modal-actions">
+      <button type="button" class="btn btn-ghost" data-chat-cancel>Cancel</button>
+      <button type="button" class="btn btn-primary" data-chat-clear><i data-lucide="trash-2"></i>Clear</button>
+    </div>`);
+});
+
+// Delegated so it survives the modal body's content swaps (register/scorecard
+// modals never carry data-chat-* buttons, so no conflicts).
+$("#modal-body").addEventListener("click", (e) => {
+  if (e.target.closest("[data-chat-cancel]")) { closeModal(); return; }
+  if (!e.target.closest("[data-chat-clear]")) return;
+  closeModal();
+  state.aiHistory = [];
+  try { localStorage.removeItem(aiHistoryKey()); } catch { /* private mode */ }
+  renderAi(); // empty history re-renders the greeting bubble
+  toast("Chat cleared", "success");
+});
+
 /* ---------- Selectors ---------- */
 ["#tt-year", "#att-year"].forEach((s) => buildYearOptions($(s)));
 
@@ -3036,6 +3313,7 @@ loadCourses().then(() => {
   if (!state.creds || !state.cookies) return; // still on the login screen
   renderDashboard();
   if (state.timetable) renderTimetable();
+  if (state.grades) renderGrades(); // hydrated grades never re-render when the revalidation is unchanged
   if (state.planLoaded) renderPlan();
 });
 if (state.creds && state.cookies) {

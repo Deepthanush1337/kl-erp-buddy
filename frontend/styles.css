@@ -2698,3 +2698,119 @@ img { max-width: 100%; }
 .exam-strip-text { font-size: 0.82rem; color: var(--text-dim); min-width: 0; overflow-wrap: break-word; }
 .exam-strip-text b { color: var(--text); font-weight: 800; }
 .exam-strip-sub { color: var(--text-faint); }
+
+/* ============ Shared: confirm modal actions + disabled tab icon buttons ============ */
+
+.confirm-text { color: var(--text-dim); font-size: 0.9rem; }
+
+.modal-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: var(--sp-2); margin-top: var(--sp-5); }
+.modal-actions .btn { min-height: 44px; }
+
+.tab-icon-btn:disabled { opacity: 0.4; cursor: default; }
+.tab-icon-btn:disabled:hover { color: var(--text-dim); border-color: var(--border); }
+
+/* ============ Grades: what-if CGPA calculator ============ */
+
+.whatif-card { margin-top: var(--sp-5); }
+
+.wi-eyebrow {
+  font-family: var(--font-mono);
+  font-size: 0.64rem;
+  font-weight: 600;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.wi-title {
+  font-family: var(--font-disp);
+  font-size: 1.3rem;
+  line-height: 1.1;
+  text-transform: lowercase;
+  margin: 6px 0 4px;
+}
+
+.wi-sub { color: var(--text-dim); font-size: 0.8rem; margin-bottom: var(--sp-2); }
+
+.wi-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: 10px 0;
+  border-top: 1px dashed var(--border);
+}
+
+.wi-course { flex: 1; min-width: 0; }
+
+.wi-code {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.wi-name {
+  display: block;
+  font-weight: 700;
+  font-size: 0.88rem;
+  margin-top: 2px;
+  overflow-wrap: break-word;
+}
+
+.wi-controls { display: flex; align-items: center; gap: var(--sp-2); flex: none; }
+
+.wi-credits, .wi-grade {
+  min-height: 44px;
+  background: #0d0d10;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-size: 0.95rem;
+  padding: 8px 10px;
+  outline: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.wi-credits { width: 62px; text-align: center; font-variant-numeric: tabular-nums; }
+
+.wi-grade {
+  min-width: 62px;
+  font-family: var(--font-mono);
+  font-weight: 700;
+  appearance: none;
+  padding-right: 28px; /* room for the chevron */
+  background-image: linear-gradient(45deg, transparent 50%, var(--lime) 50%), linear-gradient(135deg, var(--lime) 50%, transparent 50%);
+  background-position: calc(100% - 15px) 50%, calc(100% - 10px) 50%;
+  background-size: 5px 5px;
+  background-repeat: no-repeat;
+}
+
+.wi-credits:focus, .wi-grade:focus {
+  border-color: var(--lime);
+  box-shadow: 4px 4px 0 var(--purple-deep);
+}
+
+.wi-out {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  margin-top: var(--sp-4);
+  padding-top: var(--sp-3);
+  border-top: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.wi-out b {
+  font-family: var(--font-disp);
+  font-size: 1.35rem;
+  letter-spacing: 0;
+  color: var(--lime);
+}
