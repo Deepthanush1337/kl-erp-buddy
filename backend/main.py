@@ -405,6 +405,30 @@ def log_event(username: str, event: str, details: dict | None = None) -> None:
 _admin_calls: dict[str, list[float]] = {}
 
 
+def log_user(username: str, name: str) -> None:
+    """Fire-and-forget upsert of the user's display name for the admin page."""
+    if not SUPABASE_SERVICE_KEY or not username or not name:
+        return
+
+    async def _send():
+        try:
+            async with httpx.AsyncClient(verify=True, timeout=5) as c:
+                await c.post(
+                    f"{SUPABASE_URL}/rest/v1/app_users",
+                    headers={
+                        "apikey": SUPABASE_SERVICE_KEY,
+                        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                        "Content-Type": "application/json",
+                        "Prefer": "resolution=merge-duplicates,return=minimal",
+                    },
+                    json={"username": username, "name": name, "last_seen": datetime.utcnow().isoformat() + "Z"},
+                )
+        except Exception as e:
+            logger.warning("[METRICS] log_user failed: %s", e)
+
+    asyncio.create_task(_send())
+
+
 @app.post("/admin/stats")
 async def admin_stats(request: Request, admin_token: str = Form(default="")):
     ip = request.client.host if request.client else "?"
@@ -432,6 +456,15 @@ async def admin_stats(request: Request, admin_token: str = Form(default="")):
             )
             r.raise_for_status()
             events = r.json()
+            r2 = await c.get(
+                f"{SUPABASE_URL}/rest/v1/app_users",
+                headers={
+                    "apikey": SUPABASE_SERVICE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                },
+                params={"select": "username,name"},
+            )
+            names = {u["username"]: u.get("name", "") for u in (r2.json() if r2.status_code == 200 else [])}
     except Exception as e:
         logger.error("[ADMIN] metrics query failed: %s", e)
         raise HTTPException(status_code=502, detail="Metrics query failed.")
@@ -460,7 +493,7 @@ async def admin_stats(request: Request, admin_token: str = Form(default="")):
             pass
 
     users = sorted(
-        ({"username": u, **rec} for u, rec in by_user.items()),
+        ({"username": u, "name": names.get(u, ""), **rec} for u, rec in by_user.items()),
         key=lambda x: x["last_active"], reverse=True,
     )
     return {
@@ -487,10 +520,13 @@ async def login(request: Request, username: str = Form(...), password: str = For
             login_response, cookies = await login_with_retries(client, username, password, seed_cookies={})
             fresh_csrf = extract_csrf(login_response.text)
             log_event(username, "login")
+            profile = extract_profile(login_response.text)
+            if profile.get("name"):
+                log_user(username, profile["name"])
             return {
                 "success": True,
                 "message": "Logged in.",
-                "profile": extract_profile(login_response.text),
+                "profile": profile,
                 "cookies": {
                     "PHPSESSID": cookies.get("PHPSESSID"),
                     "kl_erp_device_id": cookies.get("kl_erp_device_id"),
@@ -946,6 +982,8 @@ async def fetch_profile(
         if not profile:
             raise HTTPException(status_code=404, detail="Profile not found on dashboard page.")
         log_event(username, "fetch_profile")
+        if profile.get("name"):
+            log_user(username, profile["name"])
         return {"success": True, "profile": profile,
                 **session_payload(cookie_jar, php_sess_id, server_id, unquote(csrf_cookie) if csrf_cookie else "")}
     except HTTPException:

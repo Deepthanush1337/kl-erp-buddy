@@ -2822,3 +2822,12 @@ img { max-width: 100%; }
   font-size: 0.68rem;
   margin-top: 2px;
 }
+
+/* Roll number beside the display name in admin user cards */
+.au-roll {
+  color: var(--text-faint);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.72rem;
+  font-weight: 400;
+  margin-left: 6px;
+}

@@ -1273,7 +1273,7 @@ function renderAdminDash() {
     : `<div class="adm-users">` + users.map((u) => `
         <div class="adm-user">
           <div class="au-top">
-            <span class="au-name">${esc(u.username)}</span>
+            <span class="au-name">${u.name ? `${esc(u.name)} <span class="au-roll">${esc(u.username)}</span>` : esc(u.username)}</span>
             <span class="au-when">${esc(timeAgo(u.last_active))}</span>
           </div>
           <div class="au-stats">
