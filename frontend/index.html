@@ -306,11 +306,51 @@
         <span class="dl-text"><span class="dl-label">AI</span><span class="dl-hint">ask about your data</span></span>
       </button>
     </nav>
+    <button type="button" id="about-btn" class="drawer-link drawer-about">
+      <i data-lucide="users"></i>
+      <span class="dl-text"><span class="dl-label">About us</span><span class="dl-hint">the crew behind this</span></span>
+    </button>
     <button type="button" id="logout-btn" class="drawer-link drawer-logout">
       <i data-lucide="log-out"></i>
       <span class="dl-text"><span class="dl-label">Log out</span><span class="dl-hint">clears this device's session</span></span>
     </button>
   </aside>
+
+  <!-- ============ ABOUT (the crew) ============ -->
+  <div id="about-overlay" class="about-overlay hidden">
+    <div class="about-panel" role="dialog" aria-modal="true" aria-label="About us">
+      <div class="about-head">
+        <span class="eyebrow">y26–30 batch · cse</span>
+        <button id="about-close" class="btn btn-icon" aria-label="Close about">
+          <i data-lucide="x"></i>
+        </button>
+      </div>
+      <h2 class="about-title">the crew<span class="pdot">.</span></h2>
+      <div class="crew-grid">
+        <div class="crew-card" style="animation-delay:0ms">
+          <span class="crew-num">01</span>
+          <img class="crew-avatar" src="https://api.dicebear.com/7.x/adventurer/svg?seed=Deepthanush&backgroundColor=transparent" alt="Deepthanush Chowdary avatar" loading="lazy" />
+          <div class="crew-name">Deepthanush Chowdary</div>
+        </div>
+        <div class="crew-card" style="animation-delay:60ms">
+          <span class="crew-num">02</span>
+          <img class="crew-avatar" src="https://api.dicebear.com/7.x/adventurer/svg?seed=Lohith&backgroundColor=transparent" alt="Lohith Varma avatar" loading="lazy" />
+          <div class="crew-name">Lohith Varma</div>
+        </div>
+        <div class="crew-card" style="animation-delay:120ms">
+          <span class="crew-num">03</span>
+          <img class="crew-avatar" src="https://api.dicebear.com/7.x/adventurer/svg?seed=Satya&backgroundColor=transparent" alt="Satya Sivananda avatar" loading="lazy" />
+          <div class="crew-name">Satya Sivananda</div>
+        </div>
+        <div class="crew-card" style="animation-delay:180ms">
+          <span class="crew-num">04</span>
+          <img class="crew-avatar" src="https://api.dicebear.com/7.x/adventurer/svg?seed=Narasimha&backgroundColor=transparent" alt="Narasimha Bhargav avatar" loading="lazy" />
+          <div class="crew-name">Narasimha Bhargav</div>
+        </div>
+      </div>
+      <p class="about-foot">built for KL students, by KL students — not affiliated with KL University</p>
+    </div>
+  </div>
 
   <!-- ============ MODAL ============ -->
   <div id="modal-overlay" class="modal-overlay hidden">

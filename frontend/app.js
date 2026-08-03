@@ -922,8 +922,24 @@ $("#drawer").addEventListener("keydown", (e) => {
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   if (!$("#drawer").classList.contains("hidden")) closeDrawer();
+  else if (!$("#about-overlay").classList.contains("hidden")) closeAbout();
   else if (!$("#admin-overlay").classList.contains("hidden")) closeAdmin();
 });
+
+/* ---------- About (the crew) ---------- */
+function openAbout() {
+  closeDrawer();
+  $("#about-overlay").classList.remove("hidden");
+  document.body.style.overflow = "hidden";
+  refreshIcons();
+}
+function closeAbout() {
+  $("#about-overlay").classList.add("hidden");
+  document.body.style.overflow = "";
+}
+$("#about-btn").addEventListener("click", openAbout);
+$("#about-close").addEventListener("click", closeAbout);
+$("#about-overlay").addEventListener("click", (e) => { if (e.target.id === "about-overlay") closeAbout(); });
 
 // Lazily fill in a missing profile (e.g. a session restored from before this
 // field existed) or one that predates photo support (no photo key yet) — one
