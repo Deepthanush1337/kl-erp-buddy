@@ -630,6 +630,9 @@ async def fetch_attendance(
 
         logger.info("[ATTENDANCE] ok in %.2fs (%d rows)", time.time() - start, len(attendance))
         log_event(username, "fetch_attendance", {"year": academic_year_code, "sem": semester_id, "rows": len(attendance), "ms": int((time.time() - start) * 1000)})
+        _p = extract_profile(html)
+        if _p.get("name"):
+            log_user(username, _p["name"])
         return {"success": True, "attendance": attendance, **session_payload(cookie_jar, php_sess_id, server_id, page_csrf)}
     except HTTPException:
         raise
@@ -699,6 +702,9 @@ async def fetch_timetable(
 
         logger.info("[TIMETABLE] ok in %.2fs (%d days)", time.time() - start, len(timetable))
         log_event(username, "fetch_timetable", {"year": academic_year_code, "sem": semester_id, "days": len(timetable), "ms": int((time.time() - start) * 1000)})
+        _p = extract_profile(html)
+        if _p.get("name"):
+            log_user(username, _p["name"])
         return {"success": True, "timetable": timetable, **session_payload(cookie_jar, php_sess_id, server_id, unquote(csrf_cookie) if csrf_cookie else "")}
     except HTTPException:
         raise
