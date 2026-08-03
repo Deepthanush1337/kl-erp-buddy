@@ -5,3 +5,4 @@ logs/
 .env
 node_modules/
 images/
+.verify/
