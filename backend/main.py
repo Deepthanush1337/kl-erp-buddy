@@ -10,6 +10,9 @@ from the public senior project: github.com/sivadhanushreddykotturu/render_testb_
 """
 
 import asyncio
+import base64
+import hashlib
+import hmac
 import io
 import json
 import logging
@@ -401,6 +404,163 @@ def log_event(username: str, event: str, details: dict | None = None) -> None:
     asyncio.create_task(_send())
 
 
+# ------------------ APP SESSION TOKENS (stateless auth for data endpoints) ------------------
+APP_SECRET = os.environ.get("APP_SECRET", "")
+APP_TOKEN_TTL = 30 * 24 * 3600  # 30 days
+
+
+def issue_app_token(username: str) -> str:
+    """HMAC-signed token: username|expiry|sig — proof of a completed ERP login."""
+    if not APP_SECRET:
+        return ""
+    expiry = int(time.time()) + APP_TOKEN_TTL
+    payload = f"{username}|{expiry}"
+    sig = hmac.new(APP_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    return base64.urlsafe_b64encode(f"{payload}|{sig}".encode()).decode()
+
+
+def verify_app_token(token: str) -> str:
+    """Returns the username if valid, else raises 401."""
+    if not APP_SECRET or not token:
+        raise HTTPException(status_code=401, detail="Sign in first.")
+    try:
+        decoded = base64.urlsafe_b64decode(token.encode()).decode()
+        username, expiry_s, sig = decoded.rsplit("|", 2)
+        expected = hmac.new(APP_SECRET.encode(), f"{username}|{expiry_s}".encode(), hashlib.sha256).hexdigest()
+        if not secrets.compare_digest(sig, expected) or int(expiry_s) < time.time():
+            raise ValueError
+        return username
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=401, detail="Session invalid. Sign in again.")
+
+
+async def sb_call(method: str, table: str, owner: str, body=None, params: dict | None = None, prefer: str = "return=representation"):
+    """Supabase REST call via the service key, always scoped to one owner."""
+    q = {"owner": f"eq.{owner}"}
+    if params:
+        q.update(params)
+    async with httpx.AsyncClient(verify=True, timeout=15) as c:
+        r = await c.request(
+            method,
+            f"{SUPABASE_URL}/rest/v1/{table}",
+            headers={
+                "apikey": SUPABASE_SERVICE_KEY,
+                "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                "Content-Type": "application/json",
+                "Prefer": prefer,
+            },
+            json=body,
+            params=q,
+        )
+    if r.status_code >= 400:
+        logger.error("[DATA] %s %s -> %s: %s", method, table, r.status_code, r.text[:300])
+        raise HTTPException(status_code=502, detail="Data service error.")
+    try:
+        return r.json()
+    except Exception:
+        return []
+
+
+DATA_TABLES = {
+    "tasks": {
+        "writable": {"title", "course", "due_date", "priority", "done"},
+        "required": {"title"},
+    },
+    "study_blocks": {
+        "writable": {"course", "day", "start_time", "end_time", "note", "done"},
+        "required": {"course", "day", "start_time", "end_time"},
+    },
+    "goals": {
+        "writable": {"course", "weekly_hours"},
+        "required": {"course"},
+    },
+    "prefs": {
+        "writable": {"goal", "interests", "weekly_hours", "onboarded"},
+        "required": set(),
+    },
+}
+
+
+def clean_row(table: str, payload: dict, partial: bool) -> dict:
+    """Whitelist writable fields and type-check loosely."""
+    spec = DATA_TABLES[table]
+    row = {k: v for k, v in (payload or {}).items() if k in spec["writable"]}
+    if not partial:
+        missing = spec["required"] - row.keys()
+        if missing:
+            raise HTTPException(status_code=422, detail=f"Missing fields: {', '.join(sorted(missing))}")
+    if "title" in row:
+        row["title"] = str(row["title"])[:200]
+    if "course" in row:
+        row["course"] = str(row["course"])[:80]
+    if "note" in row:
+        row["note"] = str(row["note"])[:300]
+    if "goal" in row:
+        row["goal"] = str(row["goal"])[:80]
+    if "interests" in row:
+        row["interests"] = str(row["interests"])[:300]
+    if "priority" in row:
+        row["priority"] = max(0, min(2, int(row["priority"])))
+    if "weekly_hours" in row:
+        row["weekly_hours"] = max(0, min(100, float(row["weekly_hours"])))
+    for b in ("done", "onboarded"):
+        if b in row:
+            row[b] = bool(row[b])
+    for d in ("due_date", "day"):
+        if d in row and row[d] and not re.match(r"^\d{4}-\d{2}-\d{2}$", str(row[d])):
+            raise HTTPException(status_code=422, detail=f"Bad date format in {d}.")
+    for t in ("start_time", "end_time"):
+        if t in row and not re.match(r"^\d{2}:\d{2}$", str(row[t])):
+            raise HTTPException(status_code=422, detail=f"Bad time format in {t}.")
+    return row
+
+
+@app.api_route("/data/{table}", methods=["GET", "POST"])
+@app.api_route("/data/{table}/{row_id}", methods=["PATCH", "DELETE"])
+async def data_api(request: Request, table: str, row_id: str | None = None):
+    if not SUPABASE_SERVICE_KEY:
+        raise HTTPException(status_code=503, detail="Data service not configured.")
+    if table not in DATA_TABLES:
+        raise HTTPException(status_code=404, detail="Not found.")
+    owner = verify_app_token(request.headers.get("x-app-token", ""))
+    m = request.method
+
+    if m == "GET" and row_id is None:
+        order = "created_at.asc" if table != "prefs" else None
+        params = {"select": "*"}
+        if order:
+            params["order"] = order
+        rows = await sb_call("GET", table, owner, params=params)
+        return {"success": True, "rows": rows}
+
+    if m == "POST" and row_id is None:
+        payload = await request.json()
+        if table == "prefs":
+            row = clean_row(table, payload, partial=True)
+            row["owner"] = owner
+            res = await sb_call("POST", table, owner, body=row,
+                                prefer="resolution=merge-duplicates,return=representation")
+        else:
+            row = clean_row(table, payload, partial=False)
+            row["owner"] = owner
+            res = await sb_call("POST", table, owner, body=row)
+        return {"success": True, "row": res[0] if isinstance(res, list) and res else res}
+
+    if row_id is not None and re.match(r"^[0-9a-fA-F-]{36}$", row_id):
+        if m == "PATCH":
+            payload = await request.json()
+            row = clean_row(table, payload, partial=True)
+            res = await sb_call("PATCH", table, owner, body=row, params={"id": f"eq.{row_id}"})
+            return {"success": True, "row": res[0] if isinstance(res, list) and res else res}
+        if m == "DELETE":
+            await sb_call("DELETE", table, owner, params={"id": f"eq.{row_id}"}, prefer="return=minimal")
+            return {"success": True}
+
+    raise HTTPException(status_code=405, detail="Method not allowed.")
+
+
 # ------------------ /admin/stats ------------------
 _admin_calls: dict[str, list[float]] = {}
 
@@ -527,6 +687,7 @@ async def login(request: Request, username: str = Form(...), password: str = For
                 "success": True,
                 "message": "Logged in.",
                 "profile": profile,
+                "app_token": issue_app_token(username),
                 "cookies": {
                     "PHPSESSID": cookies.get("PHPSESSID"),
                     "kl_erp_device_id": cookies.get("kl_erp_device_id"),
@@ -990,7 +1151,7 @@ async def fetch_profile(
         log_event(username, "fetch_profile")
         if profile.get("name"):
             log_user(username, profile["name"])
-        return {"success": True, "profile": profile,
+        return {"success": True, "profile": profile, "app_token": issue_app_token(username),
                 **session_payload(cookie_jar, php_sess_id, server_id, unquote(csrf_cookie) if csrf_cookie else "")}
     except HTTPException:
         raise

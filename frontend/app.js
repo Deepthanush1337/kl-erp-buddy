@@ -1,5 +1,5 @@
 /* ============ KL ERP Buddy — app logic ============ */
-/* global API_BASE, TURNSTILE_SITE_KEY, SUPABASE_URL, SUPABASE_ANON_KEY */
+/* global API_BASE, TURNSTILE_SITE_KEY */
 
 "use strict";
 
@@ -7,7 +7,7 @@
 const LS_COOKIES = "kl_erp_cookies";
 const LS_CREDS = "kl_erp_creds";
 const LS_PROFILE = "kl_erp_profile";
-const LS_OWNER = "kl_erp_owner";
+const LS_TOKEN = "kl_erp_token";
 const LS_AI_HISTORY = "kl_erp_ai_history";
 const LS_PREFS = "kl_erp_prefs";
 const LS_TRACK_DISMISSED = "kl_erp_track_dismissed";
@@ -17,6 +17,7 @@ const state = {
   creds: null,          // {username, password}
   cookies: null,        // {PHPSESSID, kl_erp_device_id, SERVERID, _csrf_token, _csrf}
   profile: null,        // {name, roll_no, department} from /login or /fetch-profile
+  appToken: null,       // HMAC-signed data-API token from /login (x-app-token header)
   courses: {},          // course code -> {t: full title, a: acronym} from courses.json
   timetable: null,      // raw timetable object
   attendance: null,     // array
@@ -30,7 +31,7 @@ const state = {
   seatingValidated: false,
   ttDay: null,          // selected day pill in the week view (defaults to today)
   activeTab: "dashboard",
-  planTasks: null,      // tasks rows (Supabase) or mock
+  planTasks: null,      // tasks rows (backend data API) or mock
   planBlocks: null,     // study_blocks rows
   planGoals: null,      // goals rows
   planDay: null,        // selected day in the plan view (ISO date, defaults to today)
@@ -39,7 +40,7 @@ const state = {
   aiStatus: null,       // null = unchecked, "on", "off"
   aiSending: false,
   aiHistory: [],        // [{role: "user"|"assistant"|"error", content}] — capped at 20
-  prefs: null,          // {goal, interests, weekly_hours, onboarded} — Supabase prefs row / LS cache
+  prefs: null,          // {goal, interests, weekly_hours, onboarded} — backend prefs row / LS cache
 };
 
 /* ---------- DOM helpers ---------- */
@@ -132,19 +133,23 @@ $("#modal-overlay").addEventListener("click", (e) => {
 function saveCreds(c) { state.creds = c; localStorage.setItem(LS_CREDS, JSON.stringify(c)); }
 function saveCookies(c) { state.cookies = c; localStorage.setItem(LS_COOKIES, JSON.stringify(c)); }
 function saveProfile(p) { state.profile = p; localStorage.setItem(LS_PROFILE, JSON.stringify(p)); }
+function saveToken(t) { state.appToken = t; try { localStorage.setItem(LS_TOKEN, t); } catch { /* private mode — memory only */ } }
 function loadStored() {
   try {
     state.creds = JSON.parse(localStorage.getItem(LS_CREDS) || "null");
     state.cookies = JSON.parse(localStorage.getItem(LS_COOKIES) || "null");
     state.profile = JSON.parse(localStorage.getItem(LS_PROFILE) || "null");
   } catch { state.creds = null; state.cookies = null; state.profile = null; }
+  state.appToken = localStorage.getItem(LS_TOKEN) || null;
 }
 function clearSession() {
   localStorage.removeItem(LS_CREDS);
   localStorage.removeItem(LS_COOKIES);
   localStorage.removeItem(LS_PROFILE);
+  localStorage.removeItem(LS_TOKEN);
   clearDataCaches();
   state.creds = null; state.cookies = null; state.profile = null;
+  state.appToken = null;
   state.timetable = null; state.attendance = null;
   state.grades = null; state.seating = null;
   state.ttKey = null; state.attKey = null;
@@ -208,7 +213,7 @@ function dedup(name, fn) {
 /* ---------- Mock data (visual testing) ---------- */
 // Append ?mock=1 to the URL to render realistic fake rows. Inactive otherwise;
 // login and the detail endpoints always hit the real backend. In mock mode the
-// Plan tab uses canned tasks/blocks/goals (Supabase is never touched) and the
+// Plan tab uses canned tasks/blocks/goals (the data API is never touched) and the
 // AI tab replies with a canned message (no /ai/chat call).
 const MOCK_MODE = new URLSearchParams(location.search).has("mock");
 
@@ -347,6 +352,36 @@ async function api(path, extraFields = {}) {
   return data;
 }
 
+// JSON helper for the per-account data store (/data/tasks, /data/study_blocks,
+// /data/goals, /data/prefs). Auth is the app token from /login (x-app-token
+// header) — rows are scoped to the roll number server-side, so there is no
+// owner field to send. Same error mapping as api(). Mock-mode callers bypass
+// this entirely, exactly like they bypassed direct planner storage before.
+async function dataApi(table, { method = "GET", id, body } = {}) {
+  let res;
+  try {
+    res = await fetch(`${API_BASE}/data/${table}${id ? `/${id}` : ""}`, {
+      method,
+      headers: { "Content-Type": "application/json", "x-app-token": state.appToken || "" },
+      body: body == null ? undefined : JSON.stringify(body),
+    });
+  } catch {
+    throw new Error("Can't reach the server. Check your internet and try again.");
+  }
+
+  if (res.status === 401) {
+    clearSession();
+    showLogin();
+    toast("Session expired. Please sign in again.", "error");
+    throw new Error("unauthorized");
+  }
+  if (!res.ok) throw new Error(friendlyHttpError(res));
+
+  const data = await res.json();
+  if (data.success === false) throw new Error(data.message || "Request failed");
+  return data;
+}
+
 /* ---------- Academic year / semester ---------- */
 function academicYearCode(yearStr) {
   // ERP codes observed: 2024-25 -> 16, 2025-26 -> 19, 2026-27 -> 29
@@ -464,28 +499,10 @@ function shiftISO(n) { const d = new Date(); d.setDate(d.getDate() + n); return 
 // Postgres time columns come back as "13:00:00" — keep HH:MM only.
 function hhmm(t) { return String(t || "").slice(0, 5); }
 
-/* ---------- Supabase (Plan tab storage) ---------- */
-// One shared client. Every planner row carries a per-device anonymous owner
-// UUID; reads/writes always filter on it. The anon key is public by design.
-const sb = (window.supabase && typeof window.supabase.createClient === "function" && SUPABASE_URL && SUPABASE_ANON_KEY)
-  ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
-  : null;
-
-function ownerId() {
-  let id = localStorage.getItem(LS_OWNER);
-  if (!id) {
-    id = (window.crypto && typeof crypto.randomUUID === "function")
-      ? crypto.randomUUID()
-      : "owner-" + Date.now().toString(36) + Math.random().toString(36).slice(2);
-    localStorage.setItem(LS_OWNER, id);
-  }
-  return id;
-}
-
-/* ---------- Prefs & onboarding (Supabase prefs table) ---------- */
-// One prefs row per device owner: goal, interests (comma string), weekly_hours
-// target, onboarded flag. Cached in localStorage after a finish/skip or a
-// remote hit so the app never refetches on every boot.
+/* ---------- Prefs & onboarding (backend prefs table) ---------- */
+// One prefs row per account (roll number): goal, interests (comma string),
+// weekly_hours target, onboarded flag. Cached in localStorage after a
+// finish/skip or a remote hit so the app never refetches on every boot.
 function cachePrefs(p) {
   state.prefs = p;
   try { localStorage.setItem(LS_PREFS, JSON.stringify(p)); } catch { /* full — keep in memory */ }
@@ -509,35 +526,33 @@ async function initOnboarding() {
     return;
   }
   if (MOCK_MODE) { openOnboarding(); return; }  // planner storage is never touched in mock mode
-  if (!sb) return;
+  // A session restored from before token auth is still minting its app token —
+  // wait for it, but treat failure like any other network trouble and skip.
+  if (!state.appToken) await ensureProfile();
+  if (!state.appToken) return;
   try {
-    const { data, error } = await sb.from("prefs").select("*").eq("owner", ownerId()).maybeSingle();
-    if (error) throw new Error(error.message);
-    if (data && data.onboarded) {
+    const data = await dataApi("prefs");
+    const row = (data.rows || [])[0];
+    if (row && row.onboarded) {
       cachePrefs({
-        goal: data.goal || "",
-        interests: data.interests || "",
-        weekly_hours: data.weekly_hours == null ? null : num(data.weekly_hours),
+        goal: row.goal || "",
+        interests: row.interests || "",
+        weekly_hours: row.weekly_hours == null ? null : num(row.weekly_hours),
         onboarded: true,
       });
       renderDashboard();
     } else {
       openOnboarding();
     }
-  } catch { /* Supabase unreachable — skip onboarding this session */ }
+  } catch { /* server unreachable — skip onboarding this session */ }
 }
 
 async function upsertPrefs(p) {
-  if (MOCK_MODE || !sb) return;
-  const { error } = await sb.from("prefs").upsert({
-    owner: ownerId(),
-    goal: p.goal,
-    interests: p.interests,
-    weekly_hours: p.weekly_hours,
-    onboarded: p.onboarded,
-    updated_at: new Date().toISOString(),
-  }, { onConflict: "owner" });
-  if (error) throw new Error(error.message);
+  if (MOCK_MODE) return;
+  await dataApi("prefs", {
+    method: "POST",
+    body: { goal: p.goal, interests: p.interests, weekly_hours: p.weekly_hours, onboarded: p.onboarded },
+  });
 }
 
 const ONB_GOALS = [
@@ -948,20 +963,27 @@ $("#about-overlay").addEventListener("click", (e) => { if (e.target.id === "abou
 // field existed) or one that predates photo support (no photo key yet) — one
 // call, then the greeting/avatar re-render. Failure is harmless: the greeting
 // keeps the username fallback.
-let profileFetchInFlight = false;
-async function ensureProfile() {
+// The same call mints the data-API app token for sessions restored from before
+// token auth existed (/fetch-profile returns app_token alongside the profile),
+// so plan/onboarding loaders can await this when state.appToken is missing.
+let profileFetchPromise = null;
+function ensureProfile() {
   const p = state.profile;
   const complete = p && p.name && typeof p.photo === "string";
-  if (complete || profileFetchInFlight || !state.creds) return;
-  profileFetchInFlight = true;
-  try {
-    const data = await api("/fetch-profile", { ...cookieOnlyFields() });
-    if (data.profile && data.profile.name) {
-      saveProfile(data.profile);
-      renderGreeting();
-    }
-  } catch { /* keep the fallback greeting */ }
-  finally { profileFetchInFlight = false; }
+  if ((complete && state.appToken) || !state.creds) return Promise.resolve();
+  if (profileFetchPromise) return profileFetchPromise;
+  profileFetchPromise = (async () => {
+    try {
+      const data = await api("/fetch-profile", { ...cookieOnlyFields() });
+      if (data.app_token) saveToken(data.app_token);
+      if (data.profile && data.profile.name) {
+        saveProfile(data.profile);
+        renderGreeting();
+      }
+    } catch { /* keep the fallback greeting */ }
+    finally { profileFetchPromise = null; }
+  })();
+  return profileFetchPromise;
 }
 
 /* ---------- Tabs ---------- */
@@ -1068,6 +1090,7 @@ $("#login-form").addEventListener("submit", async (e) => {
     saveCreds({ username, password });
     if (data.cookies) saveCookies(data.cookies);
     if (data.profile && data.profile.name) saveProfile(data.profile);
+    if (data.app_token) saveToken(data.app_token);
     toast(data.message || "Signed in", "success");
     showApp();
   } catch (err) {
@@ -2417,7 +2440,7 @@ function renderSeating() {
   setHTML(box, html);
 }
 
-/* ---------- Plan: study planner + tasks (Supabase) ---------- */
+/* ---------- Plan: study planner + tasks (backend data API) ---------- */
 const PRIO_LABELS = ["LOW", "NORM", "HIGH"];
 
 // Free time for a set of merged class blocks: gaps between blocks, plus after
@@ -2509,19 +2532,18 @@ async function loadPlan(force) {
       const m = mockPlanData();
       state.planTasks = m.tasks; state.planBlocks = m.blocks; state.planGoals = m.goals;
     } else {
-      if (!sb) throw new Error("Planner storage failed to load — check your connection and retry.");
-      const owner = ownerId();
+      // A session restored from before token auth may still be minting its app
+      // token — wait once, then fail like any other unreachable-server case.
+      if (!state.appToken) await ensureProfile();
+      if (!state.appToken) throw new Error("Can't reach the server. Check your internet and try again.");
       const [t, b, g] = await Promise.all([
-        sb.from("tasks").select("*").eq("owner", owner).order("created_at", { ascending: true }),
-        sb.from("study_blocks").select("*").eq("owner", owner).order("start_time", { ascending: true }),
-        sb.from("goals").select("*").eq("owner", owner),
+        dataApi("tasks"),
+        dataApi("study_blocks"),
+        dataApi("goals"),
       ]);
-      if (t.error) throw new Error(t.error.message);
-      if (b.error) throw new Error(b.error.message);
-      if (g.error) throw new Error(g.error.message);
-      state.planTasks = t.data || [];
-      state.planBlocks = b.data || [];
-      state.planGoals = g.data || [];
+      state.planTasks = t.rows || [];
+      state.planBlocks = b.rows || [];
+      state.planGoals = g.rows || [];
     }
     state.planLoaded = true;
     renderPlan();
@@ -2719,23 +2741,20 @@ function renderPlan() {
 }
 
 /* --- Plan CRUD (mock mode mutates local state only) --- */
-async function sbInsert(table, row) {
+async function planInsert(table, row) {
   if (MOCK_MODE) {
     return { id: "mock-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), ...row };
   }
-  const { data, error } = await sb.from(table).insert({ owner: ownerId(), ...row }).select().single();
-  if (error) throw new Error(error.message);
-  return data;
+  const data = await dataApi(table, { method: "POST", body: row });
+  return data.row;
 }
-async function sbUpdate(table, id, patch) {
+async function planUpdate(table, id, patch) {
   if (MOCK_MODE) return;
-  const { error } = await sb.from(table).update(patch).eq("id", id).eq("owner", ownerId());
-  if (error) throw new Error(error.message);
+  await dataApi(table, { method: "PATCH", id, body: patch });
 }
-async function sbDelete(table, id) {
+async function planDelete(table, id) {
   if (MOCK_MODE) return;
-  const { error } = await sb.from(table).delete().eq("id", id).eq("owner", ownerId());
-  if (error) throw new Error(error.message);
+  await dataApi(table, { method: "DELETE", id });
 }
 
 // Run a mutation, toast on failure, re-render either way.
@@ -2765,7 +2784,7 @@ $("#plan-content").addEventListener("click", (e) => {
   if (bTgl) {
     const b = (state.planBlocks || []).find((x) => String(x.id) === bTgl.dataset.blockToggle);
     if (!b) return;
-    planRun(async () => { const done = !b.done; await sbUpdate("study_blocks", b.id, { done }); b.done = done; });
+    planRun(async () => { const done = !b.done; await planUpdate("study_blocks", b.id, { done }); b.done = done; });
     return;
   }
   const bDel = e.target.closest("[data-block-del]");
@@ -2773,7 +2792,7 @@ $("#plan-content").addEventListener("click", (e) => {
     const b = (state.planBlocks || []).find((x) => String(x.id) === bDel.dataset.blockDel);
     if (!b) return;
     planRun(async () => {
-      await sbDelete("study_blocks", b.id);
+      await planDelete("study_blocks", b.id);
       state.planBlocks = state.planBlocks.filter((x) => x !== b);
     }, "Block deleted");
     return;
@@ -2784,7 +2803,7 @@ $("#plan-content").addEventListener("click", (e) => {
     const t = (state.planTasks || []).find((x) => String(x.id) === tDel.dataset.taskDel);
     if (!t) return;
     planRun(async () => {
-      await sbDelete("tasks", t.id);
+      await planDelete("tasks", t.id);
       state.planTasks = state.planTasks.filter((x) => x !== t);
     }, "Task deleted");
     return;
@@ -2793,7 +2812,7 @@ $("#plan-content").addEventListener("click", (e) => {
   if (tTgl) {
     const t = (state.planTasks || []).find((x) => String(x.id) === tTgl.dataset.taskToggle);
     if (!t) return;
-    planRun(async () => { const done = !t.done; await sbUpdate("tasks", t.id, { done }); t.done = done; });
+    planRun(async () => { const done = !t.done; await planUpdate("tasks", t.id, { done }); t.done = done; });
     return;
   }
 
@@ -2801,11 +2820,11 @@ $("#plan-content").addEventListener("click", (e) => {
   if (gDel) {
     const course = gDel.dataset.goalDel;
     planRun(async () => {
-      if (!MOCK_MODE) {
-        const { error } = await sb.from("goals").delete().eq("owner", ownerId()).eq("course", course);
-        if (error) throw new Error(error.message);
-      }
-      state.planGoals = state.planGoals.filter((g) => g.course !== course);
+      // Goal rows carry their server id (from GET rows or the POST response);
+      // the guard only matters for mock rows, where planDelete no-ops anyway.
+      const g = (state.planGoals || []).find((x) => x.course === course);
+      if (g && g.id) await planDelete("goals", g.id);
+      state.planGoals = state.planGoals.filter((x) => x.course !== course);
     }, "Goal removed");
   }
 });
@@ -2832,7 +2851,7 @@ $("#plan-content").addEventListener("submit", (e) => {
       priority: state.taskPriority,
       done: false,
     };
-    planRun(async () => { state.planTasks.push(await sbInsert("tasks", task)); }, "Task added");
+    planRun(async () => { state.planTasks.push(await planInsert("tasks", task)); }, "Task added");
   }
 
   if (id === "block-form") {
@@ -2848,7 +2867,7 @@ $("#plan-content").addEventListener("submit", (e) => {
       note: $("#block-note").value.trim(),
       done: false,
     };
-    planRun(async () => { state.planBlocks.push(await sbInsert("study_blocks", block)); }, "Block added");
+    planRun(async () => { state.planBlocks.push(await planInsert("study_blocks", block)); }, "Block added");
   }
 
   if (id === "goal-form") {
@@ -2856,13 +2875,14 @@ $("#plan-content").addEventListener("submit", (e) => {
     const hours = num($("#goal-hours").value);
     if (hours <= 0) { toast("Hours must be more than 0.", "error"); return; }
     planRun(async () => {
+      let row = { course, weekly_hours: hours };
       if (!MOCK_MODE) {
-        const { error } = await sb.from("goals")
-          .upsert({ owner: ownerId(), course, weekly_hours: hours }, { onConflict: "owner,course" });
-        if (error) throw new Error(error.message);
+        // POST upserts per account+course server-side; the returned row has the id.
+        const data = await dataApi("goals", { method: "POST", body: row });
+        row = data.row || row;
       }
       const g = state.planGoals.find((x) => x.course === course);
-      if (g) g.weekly_hours = hours; else state.planGoals.push({ course, weekly_hours: hours });
+      if (g) Object.assign(g, row); else state.planGoals.push(row);
     }, "Goal saved");
   }
 });
