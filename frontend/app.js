@@ -2176,7 +2176,10 @@ function buildAiContext() {
 
 // Like api(), but surfaces the backend's detail/message for 429/403/503 so it
 // can be shown as an in-chat error bubble.
-async function aiChat(message, history, context) {
+// Streams token-by-token: calls onDelta(accumulatedText) as chunks arrive and
+// resolves to the full reply. Falls back transparently if the server ever
+// answers with the old non-streaming JSON shape.
+async function aiChat(message, history, context, onDelta) {
   const fd = new FormData();
   if (state.creds) {
     fd.set("username", state.creds.username);
@@ -2208,10 +2211,30 @@ async function aiChat(message, history, context) {
     if (res.status === 503) throw new Error(detail || "AI is unavailable right now. Try again later.");
     throw new Error(detail || friendlyHttpError(res));
   }
-  const data = await res.json();
-  if (data.cookies) saveCookies(data.cookies);
-  if (data.success === false) throw new Error(data.message || data.detail || "Request failed");
-  return String(data.reply || "").trim() || "(empty reply)";
+
+  const ctype = res.headers.get("content-type") || "";
+  if (ctype.includes("application/json")) {
+    // Non-streaming fallback path
+    const data = await res.json();
+    if (data.cookies) saveCookies(data.cookies);
+    if (data.success === false) throw new Error(data.message || data.detail || "Request failed");
+    const reply = String(data.reply || "").trim() || "(empty reply)";
+    if (onDelta) onDelta(reply);
+    return reply;
+  }
+
+  // Streaming path (text/plain token deltas)
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let full = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    full += decoder.decode(value, { stream: true });
+    if (onDelta) onDelta(full);
+  }
+  full += decoder.decode();
+  return full.trim() || "(empty reply)";
 }
 
 async function sendAi(text) {
@@ -2222,11 +2245,39 @@ async function sendAi(text) {
   state.aiSending = true;
   pushAi("user", text);
   renderAi();
+
+  // Live-streaming bubble: appended directly to the list so we don't rebuild
+  // the whole chat on every token. The thinking dots stay until token #1.
+  const list = document.getElementById("ai-list");
+  let streamEl = null;
+  let lastRender = 0;
+  const paint = (full, force) => {
+    const now = Date.now();
+    if (!force && now - lastRender < 90) return;   // throttle markdown re-render
+    lastRender = now;
+    if (!streamEl && list) {
+      const thinking = list.querySelector(".thinking");
+      if (thinking) thinking.remove();
+      streamEl = document.createElement("div");
+      streamEl.className = "chat-bubble ai md streaming";
+      list.appendChild(streamEl);
+    }
+    if (streamEl) {
+      streamEl.innerHTML = mdToHtml(full);
+      if (list) list.scrollTop = list.scrollHeight;
+    }
+  };
+
   try {
     let reply;
     if (MOCK_MODE) {
-      await new Promise((r) => setTimeout(r, 700));
-      reply = MOCK_AI_REPLY;
+      reply = "";
+      for (const ch of MOCK_AI_REPLY.match(/[^ ]+ ?/g) || [MOCK_AI_REPLY]) {
+        await new Promise((r) => setTimeout(r, 35));
+        reply += ch;
+        paint(reply, false);
+      }
+      paint(reply, true);
     } else {
       // Prior turns only (the current message goes in "message"), last 10,
       // error bubbles excluded from what the backend sees.
@@ -2235,7 +2286,8 @@ async function sendAi(text) {
         .slice(0, -1)
         .slice(-10)
         .map((m) => ({ role: m.role, content: m.content }));
-      reply = await aiChat(text, prior, buildAiContext());
+      reply = await aiChat(text, prior, buildAiContext(), (partial) => paint(partial, false));
+      paint(reply, true);
     }
     pushAi("assistant", reply);
   } catch (err) {

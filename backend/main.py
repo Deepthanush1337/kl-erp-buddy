@@ -26,7 +26,7 @@ import onnxruntime as ort
 from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from html import unescape
 from PIL import Image
 
@@ -898,6 +898,7 @@ async def ai_chat(
     csrf_cookie: str = Form(default=""),
     device_id: str = Form(default=""),
     server_id: str = Form(default=""),
+    stream: str = Form(default="1"),
 ):
     _validate(RE_USERNAME, username, "username")
     if "*" not in AI_ALLOWED_USERS and username not in AI_ALLOWED_USERS:
@@ -916,28 +917,64 @@ async def ai_chat(
     messages.extend(_parse_history(history))
     messages.append({"role": "user", "content": message[:4000]})
 
+    kimi_url = "https://api.moonshot.ai/v1/chat/completions"
+    kimi_headers = {"Authorization": f"Bearer {KIMI_API_KEY}"}
+    # kimi-k2.5 rejects any temperature other than 1 — omit it.
+    kimi_body = {"model": KIMI_MODEL, "messages": messages, "max_tokens": 4000}
+
+    if stream.lower() in ("0", "false", "no"):
+        # Non-streaming fallback (debug / old clients)
+        try:
+            async with httpx.AsyncClient(verify=True, timeout=120) as client:
+                r = await client.post(kimi_url, headers=kimi_headers, json=kimi_body)
+                r.raise_for_status()
+                reply = r.json()["choices"][0]["message"]["content"]
+            logger.info("[AI] reply for user=%s (%d chars)", username, len(reply))
+            return {"success": True, "reply": reply}
+        except httpx.HTTPStatusError as e:
+            logger.error("[AI] Kimi HTTP %s: %s", e.response.status_code, e.response.text[:500])
+            raise HTTPException(status_code=502, detail="AI service error. Try again later.")
+        except NET_ERRORS as e:
+            logger.error("[AI] Kimi unreachable: %s", e)
+            raise HTTPException(status_code=502, detail="AI service is unreachable right now. Try again later.")
+
+    # Streaming path: open the upstream stream BEFORE committing to a 200, so
+    # Kimi HTTP/network errors still surface as proper 502s to the client.
+    client = httpx.AsyncClient(verify=True, timeout=httpx.Timeout(120.0, connect=15.0))
     try:
-        async with httpx.AsyncClient(verify=True, timeout=45) as client:
-            r = await client.post(
-                "https://api.moonshot.ai/v1/chat/completions",
-                headers={"Authorization": f"Bearer {KIMI_API_KEY}"},
-                json={
-                    "model": KIMI_MODEL,
-                    "messages": messages,
-                    # kimi-k2.5 rejects any temperature other than 1 — omit it.
-                    "max_tokens": 4000,
-                },
-            )
-            r.raise_for_status()
-            reply = r.json()["choices"][0]["message"]["content"]
-        logger.info("[AI] reply for user=%s (%d chars)", username, len(reply))
-        return {"success": True, "reply": reply}
-    except httpx.HTTPStatusError as e:
-        logger.error("[AI] Kimi HTTP %s: %s", e.response.status_code, e.response.text[:500])
-        raise HTTPException(status_code=502, detail="AI service error. Try again later.")
+        stream_ctx = client.stream("POST", kimi_url, headers=kimi_headers, json={**kimi_body, "stream": True})
+        upstream = await stream_ctx.__aenter__()
     except NET_ERRORS as e:
+        await client.aclose()
         logger.error("[AI] Kimi unreachable: %s", e)
         raise HTTPException(status_code=502, detail="AI service is unreachable right now. Try again later.")
-    except Exception as e:
-        logger.error("[AI] crash: %s", e, exc_info=True)
+    if upstream.status_code != 200:
+        body = (await upstream.aread()).decode("utf-8", "ignore")[:500]
+        logger.error("[AI] Kimi HTTP %s: %s", upstream.status_code, body)
+        await stream_ctx.__aexit__(None, None, None)
+        await client.aclose()
         raise HTTPException(status_code=502, detail="AI service error. Try again later.")
+
+    async def token_stream():
+        total = 0
+        try:
+            async for line in upstream.aiter_lines():
+                if not line.startswith("data:"):
+                    continue
+                payload = line[5:].strip()
+                if payload == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(payload)
+                    text = chunk["choices"][0].get("delta", {}).get("content") or ""
+                except Exception:
+                    continue
+                if text:
+                    total += len(text)
+                    yield text
+        finally:
+            await stream_ctx.__aexit__(None, None, None)
+            await client.aclose()
+            logger.info("[AI] streamed reply for user=%s (%d chars)", username, total)
+
+    return StreamingResponse(token_stream(), media_type="text/plain; charset=utf-8")

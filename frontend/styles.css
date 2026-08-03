@@ -2075,3 +2075,15 @@ img { max-width: 100%; }
   padding: 1px 5px;
   overflow-wrap: break-word;
 }
+
+/* Streaming reply cursor */
+.chat-bubble.streaming::after {
+  content: "▍";
+  color: var(--accent, #c8ff00);
+  animation: streamBlink 0.9s steps(2, start) infinite;
+  margin-left: 1px;
+}
+@keyframes streamBlink { to { visibility: hidden; } }
+@media (prefers-reduced-motion: reduce) {
+  .chat-bubble.streaming::after { animation: none; }
+}
