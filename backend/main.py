@@ -920,7 +920,7 @@ async def ai_chat(
                 json={
                     "model": KIMI_MODEL,
                     "messages": messages,
-                    "temperature": 0.6,
+                    # kimi-k2.5 rejects any temperature other than 1 — omit it.
                     "max_tokens": 2000,
                 },
             )
