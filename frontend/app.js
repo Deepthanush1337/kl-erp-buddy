@@ -24,6 +24,10 @@ const state = {
   seating: null,        // array
   ttKey: null,          // "yearCode-semId" of loaded timetable
   attKey: null,
+  ttValidatedKey: null, // SWR: key already revalidated this session
+  attValidatedKey: null,
+  gradesValidated: false,
+  seatingValidated: false,
   ttDay: null,          // selected day pill in the week view (defaults to today)
   activeTab: "dashboard",
   planTasks: null,      // tasks rows (Supabase) or mock
@@ -139,13 +143,65 @@ function clearSession() {
   localStorage.removeItem(LS_CREDS);
   localStorage.removeItem(LS_COOKIES);
   localStorage.removeItem(LS_PROFILE);
+  clearDataCaches();
   state.creds = null; state.cookies = null; state.profile = null;
   state.timetable = null; state.attendance = null;
   state.grades = null; state.seating = null;
   state.ttKey = null; state.attKey = null;
+  state.ttValidatedKey = null; state.attValidatedKey = null;
+  state.gradesValidated = false; state.seatingValidated = false;
   state.planTasks = null; state.planBlocks = null; state.planGoals = null;
   state.planDay = null; state.planLoaded = false;
   state.aiStatus = null; state.aiSending = false;
+}
+
+/* ---------- SWR data cache (stale-while-revalidate) ---------- */
+// Per-dataset localStorage snapshots so returning visits paint instantly.
+// Entry shape: {k: scope key ("year-sem" for timetable/attendance, "" for
+// grades/seating), t: write time (ms epoch), d: payload}. Loaders render a
+// cache hit immediately, then revalidate in the background and re-render only
+// when the fresh payload differs (JSON compare).
+function cacheRead(name, key) {
+  try {
+    const e = JSON.parse(localStorage.getItem("kl_erp_cache_" + name) || "null");
+    if (!e || typeof e !== "object" || e.d == null) return null;
+    if (key != null && e.k !== key) return null;
+    return e;
+  } catch { return null; }
+}
+
+function cacheWrite(name, key, data) {
+  try {
+    localStorage.setItem("kl_erp_cache_" + name, JSON.stringify({ k: key, t: Date.now(), d: data }));
+  } catch { /* storage full — caching is best-effort */ }
+}
+
+function clearDataCaches() {
+  for (const n of ["timetable", "attendance", "grades", "seating"]) {
+    localStorage.removeItem("kl_erp_cache_" + n);
+  }
+}
+
+// Tiny dim "updated HH:MM" label next to the refresh buttons.
+function stampShow(name, ts) {
+  const el = document.getElementById("stamp-" + name);
+  if (!el) return;
+  const d = new Date(ts);
+  el.textContent = `updated ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  el.classList.remove("hidden");
+}
+
+// In-flight request dedupe: the dashboard and the individual tabs boot
+// together and would otherwise fire the same request twice.
+const inFlight = Object.create(null);
+function dedup(name, fn) {
+  if (inFlight[name]) return inFlight[name];
+  const p = Promise.resolve().then(fn).then(
+    (v) => { delete inFlight[name]; return v; },
+    (e) => { delete inFlight[name]; throw e; },
+  );
+  inFlight[name] = p;
+  return p;
 }
 
 /* ---------- Mock data (visual testing) ---------- */
@@ -738,6 +794,7 @@ function showApp() {
   const wd = now.toLocaleDateString(undefined, { weekday: "short" });
   const mon = now.toLocaleDateString(undefined, { month: "short" });
   $("#dash-date").textContent = `TODAY · ${wd}, ${mon} ${now.getDate()}`;
+  hydrateFromCache(); // paint cached snapshots before any network round-trip
   ensureProfile();
   switchTab("dashboard");
   loadDashboard();
@@ -782,13 +839,101 @@ function renderGreeting() {
   const bits = p ? [p.roll_no, deptShort(p.department)].filter(Boolean) : [];
   sub.textContent = bits.join(" · ");
   sub.classList.toggle("hidden", bits.length === 0);
+  renderAvatar();
+  renderDrawerProfile();
 }
 
+/* ---------- Avatar & drawer ---------- */
+// Two-letter uppercase initials for the lime fallback tile.
+function initials(name) {
+  const parts = String(name || "").trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) return "?";
+  const first = parts[0][0];
+  const last = parts.length > 1 ? parts[parts.length - 1][0] : "";
+  return (first + last).toUpperCase();
+}
+
+// Round header avatar: the ERP photo when the backend scraped one, else a
+// lime initials tile derived from the profile name.
+function renderAvatar() {
+  const btn = $("#avatar-btn");
+  if (!btn) return;
+  const p = state.profile || {};
+  if (p.photo) {
+    btn.innerHTML = `<img src="${esc(p.photo)}" alt="" class="avatar-img" />`;
+  } else {
+    const nm = p.name || (state.creds ? state.creds.username : "");
+    btn.innerHTML = `<span class="avatar-initials" aria-hidden="true">${esc(initials(nm))}</span>`;
+  }
+}
+
+// Profile card at the top of the drawer: bigger avatar, name, roll · dept.
+function renderDrawerProfile() {
+  const box = $("#drawer-profile");
+  if (!box) return;
+  const p = state.profile || {};
+  const name = p.name || (state.creds ? state.creds.username : "");
+  const bits = [p.roll_no, deptShort(p.department)].filter(Boolean).join(" · ");
+  const av = p.photo
+    ? `<img src="${esc(p.photo)}" alt="" class="drawer-avatar" />`
+    : `<span class="drawer-avatar avatar-initials" aria-hidden="true">${esc(initials(name))}</span>`;
+  setHTML(box, `${av}
+    <div class="dp-text">
+      <span class="dp-name">${esc(name)}</span>
+      ${bits ? `<span class="dp-sub">${esc(bits)}</span>` : ""}
+    </div>`);
+}
+
+function openDrawer() {
+  renderDrawerProfile();
+  $("#drawer-overlay").classList.remove("hidden");
+  $("#drawer").classList.remove("hidden");
+  document.body.style.overflow = "hidden";
+  const first = $("#drawer .drawer-link");
+  if (first) first.focus();
+}
+
+function closeDrawer() {
+  $("#drawer").classList.add("hidden");
+  $("#drawer-overlay").classList.add("hidden");
+  document.body.style.overflow = "";
+}
+
+$("#menu-btn").addEventListener("click", openDrawer);
+$("#avatar-btn").addEventListener("click", openDrawer);
+$("#nav-menu-btn").addEventListener("click", openDrawer);
+$("#drawer-overlay").addEventListener("click", closeDrawer);
+
+$("#drawer").addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-tab]");
+  if (btn) { switchTab(btn.dataset.tab); closeDrawer(); }
+});
+
+// Loose focus trap: keep Tab cycling inside the open drawer.
+$("#drawer").addEventListener("keydown", (e) => {
+  if (e.key !== "Tab") return;
+  const items = $$("#drawer button");
+  if (!items.length) return;
+  const first = items[0], last = items[items.length - 1];
+  if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+  else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+});
+
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  if (!$("#drawer").classList.contains("hidden")) closeDrawer();
+  else if (!$("#admin-overlay").classList.contains("hidden")) closeAdmin();
+});
+
 // Lazily fill in a missing profile (e.g. a session restored from before this
-// field existed). Failure is harmless: the greeting keeps the username fallback.
+// field existed) or one that predates photo support (no photo key yet) — one
+// call, then the greeting/avatar re-render. Failure is harmless: the greeting
+// keeps the username fallback.
 let profileFetchInFlight = false;
 async function ensureProfile() {
-  if ((state.profile && state.profile.name) || profileFetchInFlight || !state.creds) return;
+  const p = state.profile;
+  const complete = p && p.name && typeof p.photo === "string";
+  if (complete || profileFetchInFlight || !state.creds) return;
   profileFetchInFlight = true;
   try {
     const data = await api("/fetch-profile", { ...cookieOnlyFields() });
@@ -812,6 +957,7 @@ function switchTab(tab) {
       nav.scrollTo({ left: b.offsetLeft - nav.clientWidth / 2 + b.clientWidth / 2 });
     }
   });
+  $$(".drawer-link[data-tab]").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
   $$(".tab-panel").forEach((p) => p.classList.toggle("active", p.id === `tab-${tab}`));
   // Lazy-load data for the tab (loaders render cached data or fetch)
   if (tab === "attendance") loadAttendance();
@@ -919,8 +1065,224 @@ $("#login-form").addEventListener("submit", async (e) => {
 $("#logout-btn").addEventListener("click", () => {
   clearSession();
   closeModal();
+  closeDrawer();
   showLogin();
   toast("Logged out", "success");
+});
+
+/* ---------- Hidden admin page (owner only) ---------- */
+// Entry: 5 quick taps on the login-screen logo within a 2s window. The
+// passcode is verified by the backend on every unlock and kept only in
+// memory — closing the overlay (or refreshing the page) locks it again.
+const admin = { token: null, data: null };
+
+let logoTaps = 0;
+let logoTapStart = 0;
+$("#login-screen .brand-logo").addEventListener("click", () => {
+  const now = Date.now();
+  if (now - logoTapStart > 2000) { logoTaps = 0; logoTapStart = now; }
+  logoTaps += 1;
+  if (logoTaps >= 5) { logoTaps = 0; openAdmin(); }
+});
+
+function openAdmin() {
+  $("#admin-overlay").classList.remove("hidden");
+  document.body.style.overflow = "hidden";
+  if (admin.token && admin.data) renderAdminDash();
+  else renderAdminLock();
+}
+
+function closeAdmin() {
+  $("#admin-overlay").classList.add("hidden");
+  document.body.style.overflow = "";
+  admin.token = null;
+  admin.data = null;
+}
+
+$("#admin-close").addEventListener("click", closeAdmin);
+
+// "2h ago"-style relative timestamps for the users table and the event feed.
+function timeAgo(ts) {
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return "—";
+  const s = Math.max(0, Math.floor((Date.now() - d.getTime()) / 1000));
+  if (s < 60) return "just now";
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const days = Math.floor(h / 24);
+  if (days < 30) return `${days}d ago`;
+  return d.toLocaleDateString();
+}
+
+function renderAdminLock() {
+  setHTML("#admin-body", `
+    <div class="admin-lock">
+      <h2 class="admin-title">admin<span class="pdot">.</span></h2>
+      <p class="admin-sub">Owner access only. The passcode is checked against the server every time and is never stored on this device.</p>
+      <form id="admin-form">
+        <label class="field">
+          <span>Passcode</span>
+          <input type="password" id="admin-token" autocomplete="off" required />
+        </label>
+        <button type="submit" id="admin-unlock" class="btn btn-primary btn-block">
+          <span class="btn-label">Unlock</span>
+          <span class="btn-spinner hidden"></span>
+        </button>
+        <p id="admin-error" class="login-error hidden"></p>
+      </form>
+    </div>`);
+  const input = $("#admin-token");
+  if (input) input.focus();
+}
+
+// POST /admin/stats — 403/429 carry a .status so the lock screen can react.
+// Always a real backend call (like /login), even in ?mock mode.
+async function fetchAdminStats(token) {
+  const fd = new FormData();
+  fd.set("admin_token", token);
+  let res;
+  try {
+    res = await fetch(`${API_BASE}/admin/stats`, { method: "POST", body: fd });
+  } catch {
+    throw new Error("Can't reach the server. Check your internet and try again.");
+  }
+  if (res.status === 403 || res.status === 429) {
+    const err = new Error(res.status === 403
+      ? "Wrong passcode."
+      : "Too many attempts — wait a bit and try again.");
+    err.status = res.status;
+    throw err;
+  }
+  if (!res.ok) throw new Error(friendlyHttpError(res));
+  const data = await res.json();
+  if (data.success === false) throw new Error(data.message || "Request failed");
+  return data;
+}
+
+$("#admin-body").addEventListener("submit", async (e) => {
+  if (e.target.id !== "admin-form") return;
+  e.preventDefault();
+  const input = $("#admin-token");
+  const errEl = $("#admin-error");
+  const btn = $("#admin-unlock");
+  errEl.classList.add("hidden");
+  btn.disabled = true;
+  btn.querySelector(".btn-label").textContent = "Checking";
+  btn.querySelector(".btn-spinner").classList.remove("hidden");
+  try {
+    const data = await fetchAdminStats(input.value);
+    admin.token = input.value;
+    admin.data = data;
+    renderAdminDash();
+  } catch (err) {
+    btn.disabled = false;
+    btn.querySelector(".btn-label").textContent = "Unlock";
+    btn.querySelector(".btn-spinner").classList.add("hidden");
+    errEl.textContent = err.message || "Something went wrong.";
+    errEl.classList.remove("hidden");
+    if (err.status === 403) {
+      const panel = $(".admin-panel");
+      panel.classList.remove("shake");
+      void panel.offsetWidth; // restart the shake animation
+      panel.classList.add("shake");
+    }
+    input.select();
+  }
+});
+
+$("#admin-body").addEventListener("click", async (e) => {
+  const btn = e.target.closest("[data-admin-refresh]");
+  if (!btn || !admin.token) return;
+  btn.disabled = true;
+  try {
+    admin.data = await fetchAdminStats(admin.token);
+    renderAdminDash();
+  } catch (err) {
+    if (err.status === 403) {
+      admin.token = null;
+      admin.data = null;
+      renderAdminLock();
+    } else {
+      toast(err.message || "Could not refresh stats.", "error");
+      btn.disabled = false;
+    }
+  }
+});
+
+function renderAdminDash() {
+  const d = admin.data || {};
+  const t = d.totals || {};
+  const cards = [
+    { label: "Users", value: t.users, hint: "signed in at least once", icon: "users" },
+    { label: "Events · 24h", value: t.events_24h, hint: `${num(t.events)} total events`, icon: "activity" },
+    { label: "Logins", value: t.logins, hint: "all time", icon: "log-in" },
+    { label: "AI chats", value: t.ai_chats, hint: "all time", icon: "bot" },
+  ];
+  let html = `<div class="admin-title-row">
+      <h2 class="admin-title">admin<span class="pdot">.</span></h2>
+      <button type="button" class="btn btn-ghost refresh-btn" data-admin-refresh><i data-lucide="refresh-cw"></i>Refresh</button>
+    </div>
+    <div class="stats-grid">` + cards.map((c) => `
+      <div class="stat-card">
+        <div class="stat-icon"><i data-lucide="${c.icon}"></i></div>
+        <div class="stat-label">${esc(c.label)}</div>
+        <div class="stat-value">${esc(c.value == null ? "—" : c.value)}</div>
+        <div class="stat-hint">${esc(c.hint)}</div>
+      </div>`).join("") + `</div>`;
+
+  const byType = Object.entries(d.by_type || {}).sort((a, b) => num(b[1]) - num(a[1]));
+  const max = Math.max(1, ...byType.map(([, c]) => num(c)));
+  html += `<h3 class="section-title">Events by type</h3>`;
+  html += byType.length === 0
+    ? `<p class="tt-note" style="margin-top:0">No events logged yet.</p>`
+    : `<div class="adm-bars">` + byType.map(([k, c]) => `
+        <div class="adm-bar-row">
+          <span class="adm-bar-key">${esc(k)}</span>
+          <div class="adm-bar"><div class="adm-bar-fill" style="width:${Math.min(100, (num(c) / max) * 100).toFixed(1)}%"></div></div>
+          <span class="adm-bar-count">${esc(c)}</span>
+        </div>`).join("") + `</div>`;
+
+  const users = Array.isArray(d.users) ? d.users : [];
+  html += `<h3 class="section-title">Users · ${users.length}</h3>`;
+  html += users.length === 0
+    ? `<p class="tt-note" style="margin-top:0">No users yet.</p>`
+    : `<div class="adm-users">` + users.map((u) => `
+        <div class="adm-user">
+          <div class="au-top">
+            <span class="au-name">${esc(u.username)}</span>
+            <span class="au-when">${esc(timeAgo(u.last_active))}</span>
+          </div>
+          <div class="au-stats">
+            <span><b>${esc(u.events == null ? 0 : u.events)}</b> events</span>
+            <span><b>${esc(u.logins == null ? 0 : u.logins)}</b> logins</span>
+            <span><b>${esc(u.ai_chats == null ? 0 : u.ai_chats)}</b> ai chats</span>
+          </div>
+        </div>`).join("") + `</div>`;
+
+  const recent = (Array.isArray(d.recent) ? d.recent : []).slice(0, 25);
+  html += `<h3 class="section-title">Recent events</h3>`;
+  html += recent.length === 0
+    ? `<p class="tt-note" style="margin-top:0">Nothing logged yet.</p>`
+    : `<div class="adm-feed">` + recent.map((r) => `
+        <div class="adm-feed-row">
+          <span class="af-user">${esc(r.username)}</span>
+          <span class="af-event">${esc(r.event)}</span>
+          <span class="af-when">${esc(timeAgo(r.created_at))}</span>
+        </div>`).join("") + `</div>`;
+
+  setHTML("#admin-body", html);
+}
+
+// Keep Tab inside the admin overlay while it's open.
+$("#admin-overlay").addEventListener("keydown", (e) => {
+  if (e.key !== "Tab") return;
+  const items = $$("#admin-overlay button, #admin-overlay input");
+  if (!items.length) return;
+  const first = items[0], last = items[items.length - 1];
+  if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+  else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
 });
 
 /* ---------- Data loaders ---------- */
@@ -929,23 +1291,6 @@ function semParams(yearSel, semSel) {
     academic_year_code: academicYearCode($(yearSel).value),
     semester_id: $(semSel).value,
   };
-}
-
-async function loadTimetable(force) {
-  const key = `${$("#tt-year").value}-${$("#tt-semester").value}`;
-  if (!force && state.timetable && state.ttKey === key) { renderTimetable(); return; }
-  setHTML("#timetable-content", skelRows(5));
-  try {
-    const data = await api("/fetch-timetable", { ...semParams("#tt-year", "#tt-semester"), ...cookieOnlyFields() });
-    state.timetable = data.timetable || {};
-    state.ttKey = key;
-    renderTimetable();
-    renderDashboard();
-  } catch (err) {
-    if (err.message !== "unauthorized") {
-      setHTML("#timetable-content", emptyState("Could not load timetable", err.message, "calendar-days"));
-    }
-  }
 }
 
 function cookieOnlyFields() {
@@ -959,70 +1304,185 @@ function cookieOnlyFields() {
   return fd;
 }
 
+// Core fetchers: deduped while in flight (the dashboard and the individual
+// tabs boot together), write through to the SWR cache, and re-render only
+// when the fresh payload actually differs (JSON compare).
+function fetchTimetableFresh() {
+  const key = `${$("#tt-year").value}-${$("#tt-semester").value}`;
+  return dedup(`tt:${key}`, async () => {
+    const data = await api("/fetch-timetable", { ...semParams("#tt-year", "#tt-semester"), ...cookieOnlyFields() });
+    const fresh = data.timetable || {};
+    const changed = state.ttKey !== key || JSON.stringify(fresh) !== JSON.stringify(state.timetable);
+    state.timetable = fresh;
+    state.ttKey = key;
+    cacheWrite("timetable", key, fresh);
+    stampShow("timetable", Date.now());
+    if (changed) { renderTimetable(); renderDashboard(); }
+  });
+}
+
+function fetchAttendanceFresh() {
+  const key = `${$("#att-year").value}-${$("#att-semester").value}`;
+  return dedup(`att:${key}`, async () => {
+    const data = await api("/fetch-attendance", { ...semParams("#att-year", "#att-semester"), ...cookieOnlyFields() });
+    const fresh = data.attendance || [];
+    const changed = state.attKey !== key || JSON.stringify(fresh) !== JSON.stringify(state.attendance);
+    state.attendance = fresh;
+    state.attKey = key;
+    cacheWrite("attendance", key, fresh);
+    stampShow("attendance", Date.now());
+    if (changed) { renderAttendance(); renderDashboard(); }
+  });
+}
+
+function fetchGradesFresh() {
+  return dedup("grades", async () => {
+    const data = await api("/fetch-cgpa", { ...cookieOnlyFields() });
+    const fresh = data.data || [];
+    const changed = JSON.stringify(fresh) !== JSON.stringify(state.grades);
+    state.grades = fresh;
+    cacheWrite("grades", "", fresh);
+    stampShow("grades", Date.now());
+    if (changed) renderGrades();
+  });
+}
+
+function fetchSeatingFresh() {
+  return dedup("seating", async () => {
+    const data = await api("/fetch-seating-plan", { ...cookieOnlyFields() });
+    const fresh = data.seating_plan || [];
+    const changed = JSON.stringify(fresh) !== JSON.stringify(state.seating);
+    state.seating = fresh;
+    cacheWrite("seating", "", fresh);
+    stampShow("exams", Date.now());
+    if (changed) renderSeating();
+  });
+}
+
+// Stale-while-revalidate: a cache hit paints instantly (zero spinner), then a
+// background fetch revalidates — once per key per session, unless forced.
+async function loadTimetable(force) {
+  const key = `${$("#tt-year").value}-${$("#tt-semester").value}`;
+  if (!force && state.timetable && state.ttKey === key && state.ttValidatedKey === key) { renderTimetable(); return; }
+  if (!(state.timetable && state.ttKey === key)) {
+    const cached = force ? null : cacheRead("timetable", key);
+    if (cached) {
+      state.timetable = cached.d;
+      state.ttKey = key;
+      renderTimetable();
+      renderDashboard();
+      stampShow("timetable", cached.t);
+    } else {
+      setHTML("#timetable-content", skelRows(5));
+    }
+  }
+  state.ttValidatedKey = key;
+  try {
+    await fetchTimetableFresh();
+  } catch (err) {
+    if (err.message !== "unauthorized" && !(state.timetable && state.ttKey === key)) {
+      setHTML("#timetable-content", emptyState("Could not load timetable", err.message, "calendar-days"));
+    }
+  }
+}
+
 async function loadAttendance(force) {
   const key = `${$("#att-year").value}-${$("#att-semester").value}`;
-  if (!force && state.attendance && state.attKey === key) { renderAttendance(); return; }
-  setHTML("#attendance-content", skelRows(5));
-  setHTML("#attendance-summary", "");
+  if (!force && state.attendance && state.attKey === key && state.attValidatedKey === key) { renderAttendance(); return; }
+  if (!(state.attendance && state.attKey === key)) {
+    const cached = force ? null : cacheRead("attendance", key);
+    if (cached) {
+      state.attendance = cached.d;
+      state.attKey = key;
+      renderAttendance();
+      renderDashboard();
+      stampShow("attendance", cached.t);
+    } else {
+      setHTML("#attendance-content", skelRows(5));
+      setHTML("#attendance-summary", "");
+    }
+  }
+  state.attValidatedKey = key;
   try {
-    const data = await api("/fetch-attendance", { ...semParams("#att-year", "#att-semester"), ...cookieOnlyFields() });
-    state.attendance = data.attendance || [];
-    state.attKey = key;
-    renderAttendance();
-    renderDashboard();
+    await fetchAttendanceFresh();
   } catch (err) {
-    if (err.message !== "unauthorized") {
+    if (err.message !== "unauthorized" && !(state.attendance && state.attKey === key)) {
       setHTML("#attendance-content", emptyState("Could not load attendance", err.message, "chart-column"));
     }
   }
 }
 
 async function loadGrades(force) {
-  if (!force && state.grades) { renderGrades(); return; }
-  setHTML("#grades-content", skelRows(5));
-  setHTML("#grades-summary", "");
+  if (!force && state.grades && state.gradesValidated) { renderGrades(); return; }
+  if (!state.grades) {
+    const cached = force ? null : cacheRead("grades", "");
+    if (cached) {
+      state.grades = cached.d;
+      renderGrades();
+      stampShow("grades", cached.t);
+    } else {
+      setHTML("#grades-content", skelRows(5));
+      setHTML("#grades-summary", "");
+    }
+  }
+  state.gradesValidated = true;
   try {
-    const data = await api("/fetch-cgpa", { ...cookieOnlyFields() });
-    state.grades = data.data || [];
-    renderGrades();
+    await fetchGradesFresh();
   } catch (err) {
-    if (err.message !== "unauthorized") {
+    if (err.message !== "unauthorized" && !state.grades) {
       setHTML("#grades-content", emptyState("Could not load grades", err.message, "graduation-cap"));
     }
   }
 }
 
 async function loadSeating(force) {
-  if (!force && state.seating) { renderSeating(); return; }
-  setHTML("#exams-content", skelRows(4));
+  if (!force && state.seating && state.seatingValidated) { renderSeating(); return; }
+  if (!state.seating) {
+    const cached = force ? null : cacheRead("seating", "");
+    if (cached) {
+      state.seating = cached.d;
+      renderSeating();
+      stampShow("exams", cached.t);
+    } else {
+      setHTML("#exams-content", skelRows(4));
+    }
+  }
+  state.seatingValidated = true;
   try {
-    const data = await api("/fetch-seating-plan", { ...cookieOnlyFields() });
-    state.seating = data.seating_plan || [];
-    renderSeating();
+    await fetchSeatingFresh();
   } catch (err) {
-    if (err.message !== "unauthorized") {
+    if (err.message !== "unauthorized" && !state.seating) {
       setHTML("#exams-content", emptyState("Could not load seating plan", err.message, "armchair"));
     }
   }
 }
 
+// Restore the last cached snapshots into state before the first paint, so a
+// returning session renders instantly; the loaders revalidate right after.
+function hydrateFromCache() {
+  const ttKey = `${$("#tt-year").value}-${$("#tt-semester").value}`;
+  const attKey = `${$("#att-year").value}-${$("#att-semester").value}`;
+  const tt = cacheRead("timetable", ttKey);
+  if (tt) { state.timetable = tt.d; state.ttKey = ttKey; stampShow("timetable", tt.t); }
+  const att = cacheRead("attendance", attKey);
+  if (att) { state.attendance = att.d; state.attKey = attKey; stampShow("attendance", att.t); }
+  const gr = cacheRead("grades", "");
+  if (gr) { state.grades = gr.d; stampShow("grades", gr.t); }
+  const se = cacheRead("seating", "");
+  if (se) { state.seating = se.d; stampShow("exams", se.t); }
+}
+
 async function loadDashboard() {
-  setHTML("#dashboard-content", skelCards(3));
-  // Dashboard composes timetable + attendance; fetch attendance for current term if needed
-  if (!state.attendance) {
-    try {
-      const data = await api("/fetch-attendance", { ...semParams("#att-year", "#att-semester"), ...cookieOnlyFields() });
-      state.attendance = data.attendance || [];
-      state.attKey = `${$("#att-year").value}-${$("#att-semester").value}`;
-    } catch { state.attendance = []; }
+  if (state.attendance === null && state.timetable === null) {
+    setHTML("#dashboard-content", skelCards(3));
+  } else {
+    renderDashboard(); // cached/hydrated data — paint before any network
   }
-  if (!state.timetable) {
-    try {
-      const data = await api("/fetch-timetable", { ...semParams("#tt-year", "#tt-semester"), ...cookieOnlyFields() });
-      state.timetable = data.timetable || {};
-      state.ttKey = `${$("#tt-year").value}-${$("#tt-semester").value}`;
-    } catch { state.timetable = {}; }
-  }
+  // Prefetch both feeds in parallel; the loaders are SWR, so cached data
+  // paints instantly and fresh copies re-render only when something changed.
+  await Promise.allSettled([loadAttendance(), loadTimetable()]);
+  if (state.attendance === null) state.attendance = [];
+  if (state.timetable === null) state.timetable = {};
   renderDashboard();
 }
 
@@ -1603,19 +2063,15 @@ async function loadPlan(force) {
   if (!state.planDay) state.planDay = todayISO();
   setHTML("#plan-content", skelRows(5));
   // Free hours + course dropdowns need timetable/attendance — lazy-load them
-  // exactly like the dashboard does.
+  // exactly like the dashboard does (shared deduped fetchers, SWR-cached).
   if (!state.timetable) {
     try {
-      const data = await api("/fetch-timetable", { ...semParams("#tt-year", "#tt-semester"), ...cookieOnlyFields() });
-      state.timetable = data.timetable || {};
-      state.ttKey = `${$("#tt-year").value}-${$("#tt-semester").value}`;
+      await fetchTimetableFresh();
     } catch (err) { if (err.message === "unauthorized") return; state.timetable = {}; }
   }
   if (!state.attendance) {
     try {
-      const data = await api("/fetch-attendance", { ...semParams("#att-year", "#att-semester"), ...cookieOnlyFields() });
-      state.attendance = data.attendance || [];
-      state.attKey = `${$("#att-year").value}-${$("#att-semester").value}`;
+      await fetchAttendanceFresh();
     } catch (err) { if (err.message === "unauthorized") return; state.attendance = []; }
   }
   try {

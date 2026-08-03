@@ -420,7 +420,7 @@ img { max-width: 100%; }
     calc(var(--sp-4) + env(safe-area-inset-left));
 }
 
-.tab-panel { display: none; animation: fadeUp 0.25s ease; }
+.tab-panel { display: none; animation: fadeUp 0.2s ease; }
 .tab-panel.active { display: block; }
 
 @keyframes fadeUp {
@@ -2087,3 +2087,395 @@ img { max-width: 100%; }
 @media (prefers-reduced-motion: reduce) {
   .chat-bubble.streaming::after { animation: none; }
 }
+
+/* ============ Cache "updated HH:MM" note (SWR) ============ */
+
+.cache-note {
+  align-self: center;
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.08em;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+/* ============ Header: hamburger + round avatar ============ */
+
+#menu-btn { flex: none; }
+
+#avatar-btn {
+  margin-left: auto;
+  flex: none;
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  border: 2px solid var(--lime);
+  border-radius: 50%;
+  background: var(--panel-2);
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 3px 3px 0 var(--purple);
+  transition: transform 0.1s ease, box-shadow 0.1s ease;
+}
+#avatar-btn:active { transform: translate(1px, 1px); box-shadow: 2px 2px 0 var(--purple); }
+
+.avatar-img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+/* Lime initials tile fallback (header + drawer sizes) */
+.avatar-initials {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--lime);
+  color: #0a0a0a;
+  font-family: var(--font-disp);
+  font-size: 0.78rem;
+  letter-spacing: 0.02em;
+}
+
+@media (min-width: 768px) {
+  #menu-btn { display: none; } /* desktop has the full inline nav */
+}
+
+/* ============ Bottom bar: 4 quick tabs + center menu diamond ============ */
+
+.nav-fab {
+  position: relative;
+  flex: none;
+  align-self: stretch;
+  width: 64px;
+  background: none;
+  border: none;
+  color: var(--text-dim);
+}
+
+/* Raised lime diamond with a purple offset twin behind it */
+.fab-diamond {
+  position: absolute;
+  left: 50%;
+  top: 2px;
+  width: 34px;
+  height: 34px;
+  transform: translateX(-50%) rotate(45deg);
+  background: var(--lime);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 0.12s ease;
+  z-index: 1;
+}
+
+.fab-diamond::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: var(--purple);
+  transform: translate(5px, 5px);
+  z-index: -1;
+  transition: transform 0.12s ease;
+}
+
+.fab-diamond svg {
+  width: 18px;
+  height: 18px;
+  color: #0a0a0a;
+  transform: rotate(-45deg); /* counter-rotate so the icon stays upright */
+}
+
+.nav-fab:active .fab-diamond { transform: translateX(-50%) translateY(3px) rotate(45deg); }
+.nav-fab:active .fab-diamond::before { transform: translate(2px, 2px); }
+
+.fab-label {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 9px;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+@media (max-width: 767px) {
+  /* Only 4 tabs + the diamond — nothing scrolls, so the raised diamond can
+     protrude above the bar (overflow-x: auto would clip it vertically). */
+  .main-nav { overflow: visible; }
+  .nav-btn { flex: 1 0 52px; }
+  .nav-btn[data-tab="plan"],
+  .nav-btn[data-tab="grades"],
+  .nav-btn[data-tab="exams"] { display: none; }
+  .nav-btn[data-tab="dashboard"] { order: 0; }
+  .nav-btn[data-tab="timetable"] { order: 1; }
+  #nav-menu-btn { order: 2; }
+  .nav-btn[data-tab="attendance"] { order: 3; }
+  .nav-btn[data-tab="ai"] { order: 4; }
+}
+
+@media (min-width: 768px) {
+  #nav-menu-btn { display: none; } /* desktop keeps the full 7-tab top nav */
+}
+
+/* ============ Drawer (slide-in menu) ============ */
+
+.drawer-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 140;
+  background: rgba(4, 4, 6, 0.72);
+  animation: fadeIn 0.18s ease;
+}
+
+.drawer {
+  position: fixed;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  z-index: 141;
+  width: min(84vw, 320px);
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+  box-shadow: 8px 0 0 var(--purple-deep); /* hard offset shadow, no blur */
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
+  padding-left: env(safe-area-inset-left);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  animation: drawerIn 0.22s ease;
+}
+
+@keyframes drawerIn {
+  from { transform: translateX(-102%); }
+  to { transform: translateX(0); }
+}
+
+.drawer-profile {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-5) var(--sp-4);
+  border-bottom: 1px solid var(--border);
+}
+
+.drawer-avatar {
+  flex: none;
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  border: 2px solid var(--lime);
+  overflow: hidden;
+  object-fit: cover;
+  background: var(--panel-2);
+  box-shadow: 3px 3px 0 var(--purple);
+}
+
+.drawer-avatar.avatar-initials { font-size: 1.05rem; }
+
+.dp-text { min-width: 0; }
+.dp-name { display: block; font-weight: 800; font-size: 0.95rem; overflow-wrap: break-word; }
+.dp-sub { display: block; color: var(--text-faint); font-size: 0.74rem; margin-top: 3px; overflow-wrap: break-word; }
+
+.drawer-nav { display: flex; flex-direction: column; padding: var(--sp-2) 0; }
+
+.drawer-link {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  width: 100%;
+  min-height: 52px;
+  padding: 8px var(--sp-4);
+  background: none;
+  border: none;
+  border-left: 3px solid transparent;
+  color: var(--text-dim);
+  font: inherit;
+  text-align: left;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.drawer-link > svg { width: 20px; height: 20px; flex: none; }
+.drawer-link:hover { color: var(--text); background: var(--panel-2); }
+.drawer-link.active {
+  color: var(--lime);
+  background: var(--lime-soft);
+  border-left-color: var(--lime);
+}
+
+.dl-text { min-width: 0; }
+.dl-label { display: block; font-weight: 700; font-size: 0.92rem; color: var(--text); }
+.drawer-link.active .dl-label { color: var(--lime); }
+.dl-hint { display: block; font-size: 0.72rem; color: var(--text-faint); margin-top: 1px; }
+
+.drawer-logout {
+  margin-top: auto;
+  border-top: 1px solid var(--border-soft);
+  color: var(--text-faint);
+}
+
+/* ============ Hidden admin page ============ */
+
+.admin-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 180; /* below toasts (200), above everything else */
+  background-color: var(--bg);
+  background-image:
+    linear-gradient(rgba(124, 92, 252, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(124, 92, 252, 0.05) 1px, transparent 1px);
+  background-size: 44px 44px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  animation: fadeIn 0.18s ease;
+  padding: calc(var(--sp-5) + env(safe-area-inset-top))
+    calc(var(--sp-4) + env(safe-area-inset-right))
+    calc(var(--sp-8) + env(safe-area-inset-bottom))
+    calc(var(--sp-4) + env(safe-area-inset-left));
+}
+
+.admin-panel {
+  max-width: 920px;
+  margin: 0 auto;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 10px 10px 0 var(--purple-deep);
+  padding: var(--sp-5);
+}
+
+.admin-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-4);
+}
+.admin-head .eyebrow { margin-bottom: 0; }
+
+.admin-title-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+
+.admin-title {
+  font-family: var(--font-disp);
+  font-size: clamp(1.9rem, 7vw, 2.6rem);
+  line-height: 1.02;
+  letter-spacing: -0.01em;
+  text-transform: lowercase;
+  margin-bottom: var(--sp-4);
+}
+
+.admin-sub { color: var(--text-dim); font-size: 0.88rem; margin-bottom: var(--sp-5); }
+
+.admin-lock { max-width: 400px; margin: var(--sp-6) auto; }
+
+/* Wrong-passcode feedback */
+.admin-panel.shake { animation: shakeX 0.32s ease; }
+
+@keyframes shakeX {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-8px); }
+  40% { transform: translateX(8px); }
+  60% { transform: translateX(-5px); }
+  80% { transform: translateX(5px); }
+}
+
+/* By-type breakdown with lime bar meters */
+.adm-bars { display: grid; gap: var(--sp-2); }
+
+.adm-bar-row {
+  display: grid;
+  grid-template-columns: minmax(0, 130px) 1fr auto;
+  align-items: center;
+  gap: var(--sp-3);
+}
+
+.adm-bar-key {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  overflow-wrap: break-word;
+}
+
+.adm-bar {
+  height: 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.adm-bar-fill { height: 100%; background: var(--lime); }
+
+.adm-bar-count {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--lime);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Users list (cards — readable at 360px, no sideways scroll) */
+.adm-users { display: grid; gap: 10px; }
+
+.adm-user {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--sp-3) var(--sp-4);
+}
+
+.au-top { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); }
+.au-name {
+  font-weight: 700;
+  font-size: 0.92rem;
+  font-family: var(--font-mono);
+  letter-spacing: 0.04em;
+  overflow-wrap: break-word;
+  min-width: 0;
+}
+.au-when { flex: none; color: var(--text-faint); font-size: 0.74rem; }
+
+.au-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px var(--sp-4);
+  margin-top: 6px;
+  color: var(--text-dim);
+  font-size: 0.78rem;
+}
+.au-stats b { color: var(--lime); font-weight: 800; font-variant-numeric: tabular-nums; }
+
+/* Recent events feed */
+.adm-feed { display: grid; }
+
+.adm-feed-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px var(--sp-2);
+  padding: 9px 0;
+  border-top: 1px dashed var(--border);
+  font-size: 0.8rem;
+}
+.adm-feed-row:first-child { border-top: none; }
+
+.af-user {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--lime);
+  letter-spacing: 0.04em;
+}
+.af-event { min-width: 0; flex: 1; color: var(--text-dim); overflow-wrap: break-word; }
+.af-when { margin-left: auto; flex: none; color: var(--text-faint); font-size: 0.72rem; font-variant-numeric: tabular-nums; }

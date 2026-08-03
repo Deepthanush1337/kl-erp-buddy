@@ -16,8 +16,10 @@ import logging
 import os
 import random
 import re
+import secrets
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime
 from urllib.parse import unquote, urlparse
 
 import httpx
@@ -314,8 +316,8 @@ def strip_tags(html: str) -> str:
 
 
 def extract_profile(page_html: str) -> dict:
-    """Pull NAME / Roll No / Department from the header dropdown present on
-    authenticated ERP pages. Returns {} when not found."""
+    """Pull NAME / Roll No / Department (+ avatar photo) from the header dropdown
+    present on authenticated ERP pages. Returns {} when not found."""
     def field(label: str) -> str:
         m = re.search(
             r"<b>\s*" + label + r"\s*:\s*</b>\s*</div>\s*<div>(.*?)</div>",
@@ -323,10 +325,18 @@ def extract_profile(page_html: str) -> dict:
         )
         return re.sub(r"\s+", " ", strip_tags(m.group(1))) if m else ""
 
+    photo = ""
+    m = re.search(r'<img[^>]+src="(data:\s*image/[a-zA-Z]+;base64,[^"]+)"', page_html, re.IGNORECASE)
+    if m:
+        candidate = m.group(1).replace("data: image", "data:image")
+        if len(candidate) < 400_000:  # sanity cap (~300 KB base64)
+            photo = candidate
+
     profile = {
         "name": field("NAME"),
         "roll_no": field("Roll No"),
         "department": field("Department"),
+        "photo": photo,
     }
     return profile if profile["name"] else {}
 
@@ -355,6 +365,111 @@ async def verify_turnstile(token: str, remote_ip: str | None = None) -> bool:
         return False
 
 
+# ------------------ USAGE METRICS (Supabase) ------------------
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://cptjsunynzzbnbghovlh.supabase.co")
+SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
+ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")
+
+
+def log_event(username: str, event: str) -> None:
+    """Fire-and-forget usage logging. Never blocks or breaks a request."""
+    if not SUPABASE_SERVICE_KEY or not username:
+        return
+
+    async def _send():
+        try:
+            async with httpx.AsyncClient(verify=True, timeout=5) as c:
+                await c.post(
+                    f"{SUPABASE_URL}/rest/v1/usage_events",
+                    headers={
+                        "apikey": SUPABASE_SERVICE_KEY,
+                        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                        "Content-Type": "application/json",
+                        "Prefer": "return=minimal",
+                    },
+                    json={"username": username, "event": event},
+                )
+        except Exception as e:
+            logger.warning("[METRICS] log_event failed: %s", e)
+
+    asyncio.create_task(_send())
+
+
+# ------------------ /admin/stats ------------------
+_admin_calls: dict[str, list[float]] = {}
+
+
+@app.post("/admin/stats")
+async def admin_stats(request: Request, admin_token: str = Form(default="")):
+    ip = request.client.host if request.client else "?"
+    now = time.time()
+    calls = [t for t in _admin_calls.get(ip, []) if now - t < 3600]
+    if len(calls) >= 20:
+        raise HTTPException(status_code=429, detail="Too many attempts.")
+    calls.append(now)
+    _admin_calls[ip] = calls
+
+    if not ADMIN_TOKEN or not admin_token or not secrets.compare_digest(admin_token, ADMIN_TOKEN):
+        raise HTTPException(status_code=403, detail="Forbidden.")
+    if not SUPABASE_SERVICE_KEY:
+        raise HTTPException(status_code=503, detail="Metrics not configured.")
+
+    try:
+        async with httpx.AsyncClient(verify=True, timeout=20) as c:
+            r = await c.get(
+                f"{SUPABASE_URL}/rest/v1/usage_events",
+                headers={
+                    "apikey": SUPABASE_SERVICE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                },
+                params={"select": "username,event,created_at", "order": "created_at.desc", "limit": "5000"},
+            )
+            r.raise_for_status()
+            events = r.json()
+    except Exception as e:
+        logger.error("[ADMIN] metrics query failed: %s", e)
+        raise HTTPException(status_code=502, detail="Metrics query failed.")
+
+    from collections import Counter, defaultdict
+    day_ago = time.time() - 86400
+    by_user: dict[str, dict] = defaultdict(lambda: {"events": 0, "logins": 0, "ai_chats": 0, "last_active": ""})
+    by_type = Counter()
+    today_count = 0
+    for e in events:
+        u, ev, ts = e.get("username", "?"), e.get("event", "?"), e.get("created_at", "")
+        by_type[ev] += 1
+        rec = by_user[u]
+        rec["events"] += 1
+        if ev == "login":
+            rec["logins"] += 1
+        if ev == "ai_chat":
+            rec["ai_chats"] += 1
+        if ts > rec["last_active"]:
+            rec["last_active"] = ts
+        try:
+            epoch = datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+            if epoch > day_ago:
+                today_count += 1
+        except Exception:
+            pass
+
+    users = sorted(
+        ({"username": u, **rec} for u, rec in by_user.items()),
+        key=lambda x: x["last_active"], reverse=True,
+    )
+    return {
+        "success": True,
+        "totals": {
+            "events": len(events),
+            "users": len(by_user),
+            "events_24h": today_count,
+            "logins": by_type.get("login", 0),
+            "ai_chats": by_type.get("ai_chat", 0),
+        },
+        "by_type": dict(by_type.most_common()),
+        "users": users[:100],
+        "recent": events[:25],
+    }
 # ------------------ /login ------------------
 @app.post("/login")
 async def login(request: Request, username: str = Form(...), password: str = Form(...), turnstile_token: str = Form(default="")):
@@ -365,6 +480,7 @@ async def login(request: Request, username: str = Form(...), password: str = For
         async with httpx.AsyncClient(verify=True, limits=limits_pool, headers=DEFAULT_HEADERS, http2=True) as client:
             login_response, cookies = await login_with_retries(client, username, password, seed_cookies={})
             fresh_csrf = extract_csrf(login_response.text)
+            log_event(username, "login")
             return {
                 "success": True,
                 "message": "Logged in.",
@@ -471,6 +587,7 @@ async def fetch_attendance(
             })
 
         logger.info("[ATTENDANCE] ok in %.2fs (%d rows)", time.time() - start, len(attendance))
+        log_event(username, "fetch_attendance")
         return {"success": True, "attendance": attendance, **session_payload(cookie_jar, php_sess_id, server_id, page_csrf)}
     except HTTPException:
         raise
@@ -539,6 +656,7 @@ async def fetch_timetable(
             timetable[day] = dict(zip(headers, [strip_tags(c) for c in cells[1:]]))
 
         logger.info("[TIMETABLE] ok in %.2fs (%d days)", time.time() - start, len(timetable))
+        log_event(username, "fetch_timetable")
         return {"success": True, "timetable": timetable, **session_payload(cookie_jar, php_sess_id, server_id, unquote(csrf_cookie) if csrf_cookie else "")}
     except HTTPException:
         raise
@@ -604,6 +722,7 @@ async def fetch_register_detail(
             for i, h in enumerate(daily_headers)
             if META + i < len(cells)
         ]
+        log_event(username, "fetch_register")
         return {"success": True, "metadata": metadata, "daily_attendance": daily,
                 **session_payload(cookie_jar, php_sess_id, server_id, active_csrf)}
     except HTTPException:
@@ -666,6 +785,7 @@ async def fetch_cgpa(
                 "semester": strip_tags(cells[10]),
                 "target_href": href,
             })
+        log_event(username, "fetch_cgpa")
         return {"success": True, "data": courses,
                 **session_payload(cookie_jar, php_sess_id, server_id, unquote(csrf_cookie) if csrf_cookie else "")}
     except HTTPException:
@@ -716,6 +836,7 @@ async def fetch_marks_detail(
                 scorecard[key] = strip_tags(td.group(1))
         if "course_desc" in scorecard and "course_name" not in scorecard:
             scorecard["course_name"] = scorecard["course_desc"]
+        log_event(username, "fetch_marks")
         return {"success": True, "scorecard": scorecard,
                 **session_payload(cookie_jar, php_sess_id, server_id, unquote(csrf_cookie) if csrf_cookie else "")}
     except HTTPException:
@@ -776,6 +897,7 @@ async def fetch_seating_plan(
                 "course_code": strip_tags(cells[6]),
                 "room_no": strip_tags(cells[7]),
             })
+        log_event(username, "fetch_seating")
         return {"success": True, "seating_plan": seating,
                 **session_payload(cookie_jar, php_sess_id, server_id, unquote(csrf_cookie) if csrf_cookie else "")}
     except HTTPException:
@@ -817,6 +939,7 @@ async def fetch_profile(
         profile = extract_profile(page)
         if not profile:
             raise HTTPException(status_code=404, detail="Profile not found on dashboard page.")
+        log_event(username, "fetch_profile")
         return {"success": True, "profile": profile,
                 **session_payload(cookie_jar, php_sess_id, server_id, unquote(csrf_cookie) if csrf_cookie else "")}
     except HTTPException:
@@ -909,6 +1032,7 @@ async def ai_chat(
         raise HTTPException(status_code=429, detail="Slow down — too many AI messages. Try again later.")
     if not KIMI_API_KEY:
         raise HTTPException(status_code=503, detail="AI is not configured on the server yet.")
+    log_event(username, "ai_chat")
 
     system_prompt = AI_SYSTEM_PROMPT
     if context:

@@ -15,6 +15,8 @@
   <link rel="apple-touch-icon" href="icon.svg" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="preconnect" href="https://kl-erp-buddy-api.onrender.com" crossorigin />
+  <link rel="dns-prefetch" href="https://kl-erp-buddy-api.onrender.com" />
   <link href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=IBM+Plex+Mono:wght@500;600;700&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="styles.css" />
 </head>
@@ -58,6 +60,9 @@
   <div id="app-screen" class="screen hidden">
     <header class="app-header">
       <div class="app-header-inner">
+        <button id="menu-btn" class="btn btn-icon" aria-label="Open menu">
+          <i data-lucide="menu"></i>
+        </button>
         <div class="app-brand">
           <img src="icon.svg" alt="" class="app-brand-logo" />
           <span class="app-brand-name">KL ERP<span class="pdot">.</span></span>
@@ -91,11 +96,12 @@
             <i data-lucide="bot"></i>
             <span>AI</span>
           </button>
+          <button type="button" class="nav-fab" id="nav-menu-btn" aria-label="Open menu">
+            <span class="fab-diamond"><i data-lucide="menu"></i></span>
+            <span class="fab-label">Menu</span>
+          </button>
         </nav>
-        <button id="logout-btn" class="btn btn-ghost" title="Log out">
-          <i data-lucide="log-out"></i>
-          <span class="logout-label">Logout</span>
-        </button>
+        <button type="button" id="avatar-btn" aria-label="Profile and menu"></button>
       </div>
     </header>
 
@@ -126,10 +132,13 @@
             <h2 class="page-title">the week<span class="pdot">.</span></h2>
             <p class="tab-sub">Weekly class schedule</p>
           </div>
-          <button class="btn btn-ghost refresh-btn" data-refresh="timetable">
-            <i data-lucide="refresh-cw"></i>
-            Refresh
-          </button>
+          <div class="tab-actions">
+            <span class="cache-note hidden" id="stamp-timetable"></span>
+            <button class="btn btn-ghost refresh-btn" data-refresh="timetable">
+              <i data-lucide="refresh-cw"></i>
+              Refresh
+            </button>
+          </div>
         </div>
         <div class="selectors">
           <label class="field field-inline">
@@ -157,10 +166,13 @@
             <h2 class="page-title">attendance<span class="pdot">.</span></h2>
             <p class="tab-sub">Course-wise attendance</p>
           </div>
-          <button class="btn btn-ghost refresh-btn" data-refresh="attendance">
-            <i data-lucide="refresh-cw"></i>
-            Refresh
-          </button>
+          <div class="tab-actions">
+            <span class="cache-note hidden" id="stamp-attendance"></span>
+            <button class="btn btn-ghost refresh-btn" data-refresh="attendance">
+              <i data-lucide="refresh-cw"></i>
+              Refresh
+            </button>
+          </div>
         </div>
         <div class="selectors">
           <label class="field field-inline">
@@ -205,10 +217,13 @@
             <h2 class="page-title">grades<span class="pdot">.</span></h2>
             <p class="tab-sub">Results &amp; scorecards</p>
           </div>
-          <button class="btn btn-ghost refresh-btn" data-refresh="grades">
-            <i data-lucide="refresh-cw"></i>
-            Refresh
-          </button>
+          <div class="tab-actions">
+            <span class="cache-note hidden" id="stamp-grades"></span>
+            <button class="btn btn-ghost refresh-btn" data-refresh="grades">
+              <i data-lucide="refresh-cw"></i>
+              Refresh
+            </button>
+          </div>
         </div>
         <div id="grades-summary"></div>
         <div id="grades-content"></div>
@@ -222,10 +237,13 @@
             <h2 class="page-title">exams<span class="pdot">.</span></h2>
             <p class="tab-sub">Seating plan</p>
           </div>
-          <button class="btn btn-ghost refresh-btn" data-refresh="exams">
-            <i data-lucide="refresh-cw"></i>
-            Refresh
-          </button>
+          <div class="tab-actions">
+            <span class="cache-note hidden" id="stamp-exams"></span>
+            <button class="btn btn-ghost refresh-btn" data-refresh="exams">
+              <i data-lucide="refresh-cw"></i>
+              Refresh
+            </button>
+          </div>
         </div>
         <div id="exams-content"></div>
       </section>
@@ -254,6 +272,46 @@
     </main>
   </div>
 
+  <!-- ============ DRAWER (slide-in menu) ============ -->
+  <div id="drawer-overlay" class="drawer-overlay hidden"></div>
+  <aside id="drawer" class="drawer hidden" role="dialog" aria-modal="true" aria-label="Menu">
+    <div class="drawer-profile" id="drawer-profile"></div>
+    <nav class="drawer-nav" aria-label="Sections">
+      <button type="button" class="drawer-link" data-tab="dashboard">
+        <i data-lucide="layout-dashboard"></i>
+        <span class="dl-text"><span class="dl-label">Dashboard</span><span class="dl-hint">today at a glance</span></span>
+      </button>
+      <button type="button" class="drawer-link" data-tab="timetable">
+        <i data-lucide="calendar-days"></i>
+        <span class="dl-text"><span class="dl-label">Timetable</span><span class="dl-hint">the full week, day by day</span></span>
+      </button>
+      <button type="button" class="drawer-link" data-tab="attendance">
+        <i data-lucide="circle-check-big"></i>
+        <span class="dl-text"><span class="dl-label">Attendance</span><span class="dl-hint">are you above 75%?</span></span>
+      </button>
+      <button type="button" class="drawer-link" data-tab="plan">
+        <i data-lucide="calendar-check"></i>
+        <span class="dl-text"><span class="dl-label">Plan</span><span class="dl-hint">tasks, blocks &amp; weekly goals</span></span>
+      </button>
+      <button type="button" class="drawer-link" data-tab="grades">
+        <i data-lucide="chart-column"></i>
+        <span class="dl-text"><span class="dl-label">Grades</span><span class="dl-hint">results &amp; scorecards</span></span>
+      </button>
+      <button type="button" class="drawer-link" data-tab="exams">
+        <i data-lucide="clipboard-list"></i>
+        <span class="dl-text"><span class="dl-label">Exams</span><span class="dl-hint">seating plan</span></span>
+      </button>
+      <button type="button" class="drawer-link" data-tab="ai">
+        <i data-lucide="bot"></i>
+        <span class="dl-text"><span class="dl-label">AI</span><span class="dl-hint">ask about your data</span></span>
+      </button>
+    </nav>
+    <button type="button" id="logout-btn" class="drawer-link drawer-logout">
+      <i data-lucide="log-out"></i>
+      <span class="dl-text"><span class="dl-label">Log out</span><span class="dl-hint">clears this device's session</span></span>
+    </button>
+  </aside>
+
   <!-- ============ MODAL ============ -->
   <div id="modal-overlay" class="modal-overlay hidden">
     <div class="modal-card" role="dialog" aria-modal="true">
@@ -275,6 +333,19 @@
         <div class="onb-dots" id="onb-dots" aria-hidden="true"></div>
       </div>
       <div id="onb-body"></div>
+    </div>
+  </div>
+
+  <!-- ============ ADMIN (hidden, owner-only — 5 taps on the login logo) ============ -->
+  <div id="admin-overlay" class="admin-overlay hidden">
+    <div class="admin-panel" role="dialog" aria-modal="true" aria-label="Admin">
+      <div class="admin-head">
+        <span class="eyebrow">owner only</span>
+        <button id="admin-close" class="btn btn-icon" aria-label="Close admin">
+          <i data-lucide="x"></i>
+        </button>
+      </div>
+      <div id="admin-body"></div>
     </div>
   </div>
 
