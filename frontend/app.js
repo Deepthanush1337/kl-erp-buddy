@@ -1120,6 +1120,9 @@ function closeAdmin() {
 
 $("#admin-close").addEventListener("click", closeAdmin);
 
+// Direct admin URL: /klu/#admin opens the lock screen straight away.
+if (location.hash === "#admin") openAdmin();
+
 // "2h ago"-style relative timestamps for the users table and the event feed.
 function timeAgo(ts) {
   const d = new Date(ts);
@@ -1287,11 +1290,26 @@ function renderAdminDash() {
     : `<div class="adm-feed">` + recent.map((r) => `
         <div class="adm-feed-row">
           <span class="af-user">${esc(r.username)}</span>
-          <span class="af-event">${esc(r.event)}</span>
+          <span class="af-event">${esc(r.event)}${r.details ? `<span class="af-details">${esc(formatEventDetails(r.details))}</span>` : ""}</span>
           <span class="af-when">${esc(timeAgo(r.created_at))}</span>
         </div>`).join("") + `</div>`;
 
   setHTML("#admin-body", html);
+}
+
+// Compact one-liner for an event's details JSON, e.g. {"year":"29","sem":"1","ms":842} → "29/1 · 842ms"
+function formatEventDetails(raw) {
+  try {
+    const d = typeof raw === "string" ? JSON.parse(raw) : raw;
+    const parts = [];
+    if (d.year) parts.push(`${d.year}/${d.sem || "-"}`);
+    if (d.rows != null) parts.push(`${d.rows} rows`);
+    if (d.days != null) parts.push(`${d.days} days`);
+    if (d.model) parts.push(d.model);
+    if (d.msg_len) parts.push(`${d.msg_len} chars`);
+    if (d.ms != null) parts.push(`${d.ms}ms`);
+    return parts.join(" · ");
+  } catch { return ""; }
 }
 
 // Keep Tab inside the admin overlay while it's open.

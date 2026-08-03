@@ -2814,3 +2814,11 @@ img { max-width: 100%; }
   letter-spacing: 0;
   color: var(--lime);
 }
+
+/* Admin feed event details */
+.af-details {
+  display: block;
+  color: var(--text-faint);
+  font-size: 0.68rem;
+  margin-top: 2px;
+}

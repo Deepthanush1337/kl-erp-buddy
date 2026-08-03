@@ -371,10 +371,16 @@ SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
 ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")
 
 
-def log_event(username: str, event: str) -> None:
+def log_event(username: str, event: str, details: dict | None = None) -> None:
     """Fire-and-forget usage logging. Never blocks or breaks a request."""
     if not SUPABASE_SERVICE_KEY or not username:
         return
+    detail_str = ""
+    if details:
+        try:
+            detail_str = json.dumps(details, separators=(",", ":"), default=str)[:500]
+        except Exception:
+            detail_str = ""
 
     async def _send():
         try:
@@ -387,7 +393,7 @@ def log_event(username: str, event: str) -> None:
                         "Content-Type": "application/json",
                         "Prefer": "return=minimal",
                     },
-                    json={"username": username, "event": event},
+                    json={"username": username, "event": event, "details": detail_str},
                 )
         except Exception as e:
             logger.warning("[METRICS] log_event failed: %s", e)
@@ -422,7 +428,7 @@ async def admin_stats(request: Request, admin_token: str = Form(default="")):
                     "apikey": SUPABASE_SERVICE_KEY,
                     "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
                 },
-                params={"select": "username,event,created_at", "order": "created_at.desc", "limit": "5000"},
+                params={"select": "username,event,details,created_at", "order": "created_at.desc", "limit": "5000"},
             )
             r.raise_for_status()
             events = r.json()
@@ -587,7 +593,7 @@ async def fetch_attendance(
             })
 
         logger.info("[ATTENDANCE] ok in %.2fs (%d rows)", time.time() - start, len(attendance))
-        log_event(username, "fetch_attendance")
+        log_event(username, "fetch_attendance", {"year": academic_year_code, "sem": semester_id, "rows": len(attendance), "ms": int((time.time() - start) * 1000)})
         return {"success": True, "attendance": attendance, **session_payload(cookie_jar, php_sess_id, server_id, page_csrf)}
     except HTTPException:
         raise
@@ -656,7 +662,7 @@ async def fetch_timetable(
             timetable[day] = dict(zip(headers, [strip_tags(c) for c in cells[1:]]))
 
         logger.info("[TIMETABLE] ok in %.2fs (%d days)", time.time() - start, len(timetable))
-        log_event(username, "fetch_timetable")
+        log_event(username, "fetch_timetable", {"year": academic_year_code, "sem": semester_id, "days": len(timetable), "ms": int((time.time() - start) * 1000)})
         return {"success": True, "timetable": timetable, **session_payload(cookie_jar, php_sess_id, server_id, unquote(csrf_cookie) if csrf_cookie else "")}
     except HTTPException:
         raise
@@ -1032,7 +1038,7 @@ async def ai_chat(
         raise HTTPException(status_code=429, detail="Slow down — too many AI messages. Try again later.")
     if not KIMI_API_KEY:
         raise HTTPException(status_code=503, detail="AI is not configured on the server yet.")
-    log_event(username, "ai_chat")
+    log_event(username, "ai_chat", {"model": KIMI_MODEL, "msg_len": len(message), "history": len(_parse_history(history))})
 
     system_prompt = AI_SYSTEM_PROMPT
     if context:
