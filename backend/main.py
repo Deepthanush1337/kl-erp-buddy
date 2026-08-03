@@ -826,3 +826,114 @@ async def fetch_profile(
     except Exception as e:
         logger.error("[PROFILE] crash: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error.")
+
+
+# ------------------ AI CHAT (Kimi) ------------------
+# AI calls never touch the ERP — they only require proof of a prior login
+# (php_sess_id + csrf_cookie) so random traffic can't burn the API key.
+KIMI_API_KEY = os.environ.get("KIMI_API_KEY", "")
+KIMI_MODEL = os.environ.get("KIMI_MODEL", "kimi-k2.5")
+AI_ALLOWED_USERS = {u.strip() for u in os.environ.get("AI_ALLOWED_USERS", "2600031735").split(",") if u.strip()}
+
+AI_SYSTEM_PROMPT = (
+    "You are KL ERP Buddy's study assistant for a KL University (KLEF) B.Tech student. "
+    "Be concise, practical, friendly; use short paragraphs and bullet lists; no fluff. "
+    "Help with study planning, task prioritization, attendance-aware advice (75% minimum rule), "
+    "and exam prep. When given the student's context (timetable, attendance, tasks, free slots), "
+    "ground every suggestion in it."
+)
+
+AI_RATE_LIMIT = 30          # max messages per user ...
+AI_RATE_WINDOW = 3600.0     # ... per rolling hour
+_ai_calls: dict[str, list[float]] = {}
+
+
+def _ai_rate_limited(username: str) -> bool:
+    """In-memory per-user rolling-window rate limit. Records the call."""
+    now = time.time()
+    calls = [t for t in _ai_calls.get(username, []) if now - t < AI_RATE_WINDOW]
+    if len(calls) >= AI_RATE_LIMIT:
+        _ai_calls[username] = calls
+        return True
+    calls.append(now)
+    _ai_calls[username] = calls
+    return False
+
+
+def _parse_history(raw: str) -> list[dict]:
+    """Parse the optional JSON chat history; malformed input is ignored silently."""
+    try:
+        items = json.loads(raw)
+    except Exception:
+        return []
+    if not isinstance(items, list):
+        return []
+    messages = []
+    for item in items[-20:]:
+        if not isinstance(item, dict):
+            continue
+        role, content = item.get("role"), item.get("content")
+        if role in ("user", "assistant") and isinstance(content, str) and content.strip():
+            messages.append({"role": role, "content": content[:4000]})
+    return messages
+
+
+@app.get("/ai/status")
+def ai_status():
+    return {"enabled": bool(KIMI_API_KEY)}
+
+
+@app.post("/ai/chat")
+async def ai_chat(
+    username: str = Form(...),
+    password: str = Form(...),
+    message: str = Form(...),
+    history: str = Form(default=""),
+    context: str = Form(default=""),
+    php_sess_id: str = Form(default=""),
+    csrf_cookie: str = Form(default=""),
+    device_id: str = Form(default=""),
+    server_id: str = Form(default=""),
+):
+    _validate(RE_USERNAME, username, "username")
+    if "*" not in AI_ALLOWED_USERS and username not in AI_ALLOWED_USERS:
+        raise HTTPException(status_code=403, detail="AI is not enabled for this account.")
+    if not php_sess_id or not csrf_cookie:
+        raise HTTPException(status_code=401, detail="Sign in first.")
+    if _ai_rate_limited(username):
+        raise HTTPException(status_code=429, detail="Slow down — too many AI messages. Try again later.")
+    if not KIMI_API_KEY:
+        raise HTTPException(status_code=503, detail="AI is not configured on the server yet.")
+
+    system_prompt = AI_SYSTEM_PROMPT
+    if context:
+        system_prompt += "\n\nSTUDENT CONTEXT:\n" + context
+    messages = [{"role": "system", "content": system_prompt}]
+    messages.extend(_parse_history(history))
+    messages.append({"role": "user", "content": message[:2000]})
+
+    try:
+        async with httpx.AsyncClient(verify=True, timeout=45) as client:
+            r = await client.post(
+                "https://api.moonshot.ai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {KIMI_API_KEY}"},
+                json={
+                    "model": KIMI_MODEL,
+                    "messages": messages,
+                    "temperature": 0.6,
+                    "max_tokens": 2000,
+                },
+            )
+            r.raise_for_status()
+            reply = r.json()["choices"][0]["message"]["content"]
+        logger.info("[AI] reply for user=%s (%d chars)", username, len(reply))
+        return {"success": True, "reply": reply}
+    except httpx.HTTPStatusError as e:
+        logger.error("[AI] Kimi HTTP %s: %s", e.response.status_code, e.response.text[:500])
+        raise HTTPException(status_code=502, detail="AI service error. Try again later.")
+    except NET_ERRORS as e:
+        logger.error("[AI] Kimi unreachable: %s", e)
+        raise HTTPException(status_code=502, detail="AI service is unreachable right now. Try again later.")
+    except Exception as e:
+        logger.error("[AI] crash: %s", e, exc_info=True)
+        raise HTTPException(status_code=502, detail="AI service error. Try again later.")

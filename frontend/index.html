@@ -75,6 +75,10 @@
             <i data-lucide="circle-check-big"></i>
             <span>Attendance</span>
           </button>
+          <button class="nav-btn" data-tab="plan">
+            <i data-lucide="calendar-check"></i>
+            <span>Plan</span>
+          </button>
           <button class="nav-btn" data-tab="grades">
             <i data-lucide="chart-column"></i>
             <span>Grades</span>
@@ -82,6 +86,10 @@
           <button class="nav-btn" data-tab="exams">
             <i data-lucide="clipboard-list"></i>
             <span>Exams</span>
+          </button>
+          <button class="nav-btn" data-tab="ai">
+            <i data-lucide="bot"></i>
+            <span>AI</span>
           </button>
         </nav>
         <button id="logout-btn" class="btn btn-ghost" title="Log out">
@@ -173,6 +181,22 @@
         <div id="attendance-content"></div>
       </section>
 
+      <!-- ===== Plan ===== -->
+      <section id="tab-plan" class="tab-panel">
+        <div class="tab-head">
+          <div class="tab-headings">
+            <p class="eyebrow">Study planner &amp; tasks</p>
+            <h2 class="page-title">plan<span class="pdot">.</span></h2>
+            <p class="tab-sub">Study blocks, weekly goals &amp; to-dos</p>
+          </div>
+          <button class="btn btn-ghost refresh-btn" data-refresh="plan">
+            <i data-lucide="refresh-cw"></i>
+            Refresh
+          </button>
+        </div>
+        <div id="plan-content"></div>
+      </section>
+
       <!-- ===== Grades ===== -->
       <section id="tab-grades" class="tab-panel">
         <div class="tab-head">
@@ -206,6 +230,22 @@
         <div id="exams-content"></div>
       </section>
 
+      <!-- ===== AI ===== -->
+      <section id="tab-ai" class="tab-panel">
+        <div class="tab-head">
+          <div class="tab-headings">
+            <p class="eyebrow">Ask your data</p>
+            <h2 class="page-title">ai<span class="pdot">.</span></h2>
+            <p class="tab-sub">Chat about classes, attendance &amp; tasks</p>
+          </div>
+          <button class="btn btn-ghost refresh-btn" data-refresh="ai">
+            <i data-lucide="refresh-cw"></i>
+            Refresh
+          </button>
+        </div>
+        <div id="ai-content"></div>
+      </section>
+
     </main>
   </div>
 
@@ -231,6 +271,7 @@
   </footer>
 
   <script src="https://unpkg.com/lucide@latest"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
   <script src="config.js"></script>
   <script src="app.js"></script>

@@ -1,5 +1,5 @@
 /* ============ KL ERP Buddy — app logic ============ */
-/* global API_BASE, TURNSTILE_SITE_KEY */
+/* global API_BASE, TURNSTILE_SITE_KEY, SUPABASE_URL, SUPABASE_ANON_KEY */
 
 "use strict";
 
@@ -7,6 +7,8 @@
 const LS_COOKIES = "kl_erp_cookies";
 const LS_CREDS = "kl_erp_creds";
 const LS_PROFILE = "kl_erp_profile";
+const LS_OWNER = "kl_erp_owner";
+const LS_AI_HISTORY = "kl_erp_ai_history";
 
 /* ---------- State ---------- */
 const state = {
@@ -21,6 +23,15 @@ const state = {
   attKey: null,
   ttDay: null,          // selected day pill in the week view (defaults to today)
   activeTab: "dashboard",
+  planTasks: null,      // tasks rows (Supabase) or mock
+  planBlocks: null,     // study_blocks rows
+  planGoals: null,      // goals rows
+  planDay: null,        // selected day in the plan view (ISO date, defaults to today)
+  planLoaded: false,    // plan data fetched at least once
+  taskPriority: 1,      // selected priority in the add-task form (0/1/2)
+  aiStatus: null,       // null = unchecked, "on", "off"
+  aiSending: false,
+  aiHistory: [],        // [{role: "user"|"assistant"|"error", content}] — capped at 20
 };
 
 /* ---------- DOM helpers ---------- */
@@ -109,11 +120,16 @@ function clearSession() {
   state.timetable = null; state.attendance = null;
   state.grades = null; state.seating = null;
   state.ttKey = null; state.attKey = null;
+  state.planTasks = null; state.planBlocks = null; state.planGoals = null;
+  state.planDay = null; state.planLoaded = false;
+  state.aiStatus = null; state.aiSending = false;
 }
 
 /* ---------- Mock data (visual testing) ---------- */
 // Append ?mock=1 to the URL to render realistic fake rows. Inactive otherwise;
-// login and the detail endpoints always hit the real backend.
+// login and the detail endpoints always hit the real backend. In mock mode the
+// Plan tab uses canned tasks/blocks/goals (Supabase is never touched) and the
+// AI tab replies with a canned message (no /ai/chat call).
 const MOCK_MODE = new URLSearchParams(location.search).has("mock");
 
 // One row per course COMPONENT (type = L/T/P/S), matching the real API shape;
@@ -178,6 +194,30 @@ function mockApiResponse(path) {
   }
   return null; // everything else goes to the real backend
 }
+
+// Plan tab canned rows — dates are generated relative to today so the
+// overdue/today/upcoming groups always have something to show.
+function mockPlanData() {
+  return {
+    tasks: [
+      { id: "mock-t1", title: "DSA assignment 4 — graph traversals", course: "24CS2101", due_date: shiftISO(-1), priority: 2, done: false },
+      { id: "mock-t2", title: "OS lab record submission", course: "24CS3102", due_date: shiftISO(0), priority: 1, done: false },
+      { id: "mock-t3", title: "CN quiz prep — subnetting", course: "24CS3104", due_date: shiftISO(3), priority: 0, done: false },
+      { id: "mock-t4", title: "Print DBMS notes", course: "24CS2103", due_date: shiftISO(-2), priority: 0, done: true },
+    ],
+    blocks: [
+      { id: "mock-b1", course: "24CS2101", day: shiftISO(0), start_time: "18:00", end_time: "19:30", note: "Graph problem set", done: false },
+      { id: "mock-b2", course: "24CS3104", day: shiftISO(0), start_time: "20:00", end_time: "21:00", note: "Subnetting drills", done: true },
+      { id: "mock-b3", course: "24CS3102", day: shiftISO(1), start_time: "17:30", end_time: "18:30", note: "Lab record", done: false },
+    ],
+    goals: [
+      { course: "24CS2101", weekly_hours: 5 },
+      { course: "24CS3104", weekly_hours: 3 },
+    ],
+  };
+}
+
+const MOCK_AI_REPLY = "Here's a plan for today (mock):\n\n• 12:00–13:00 — DSA graph problems\n• 17:30–19:00 — OS lab record (due today)\n• 20:00–21:00 — CN subnetting revision\n\nHeads-up: CN attendance is 62.5% — don't miss the next class.";
 
 /* ---------- API ---------- */
 function friendlyHttpError(res) {
@@ -298,6 +338,38 @@ function todayKey() {
   return DAY_KEYS[(new Date().getDay() + 6) % 7];
 }
 
+function minToTime(mins) {
+  return `${String(Math.floor(mins / 60)).padStart(2, "0")}:${String(mins % 60).padStart(2, "0")}`;
+}
+
+// Local-date ISO strings ("2026-08-03") — never toISOString (that would be UTC).
+function dateISO(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+function todayISO() { return dateISO(new Date()); }
+function shiftISO(n) { const d = new Date(); d.setDate(d.getDate() + n); return dateISO(d); }
+
+// Postgres time columns come back as "13:00:00" — keep HH:MM only.
+function hhmm(t) { return String(t || "").slice(0, 5); }
+
+/* ---------- Supabase (Plan tab storage) ---------- */
+// One shared client. Every planner row carries a per-device anonymous owner
+// UUID; reads/writes always filter on it. The anon key is public by design.
+const sb = (window.supabase && typeof window.supabase.createClient === "function" && SUPABASE_URL && SUPABASE_ANON_KEY)
+  ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+  : null;
+
+function ownerId() {
+  let id = localStorage.getItem(LS_OWNER);
+  if (!id) {
+    id = (window.crypto && typeof crypto.randomUUID === "function")
+      ? crypto.randomUUID()
+      : "owner-" + Date.now().toString(36) + Math.random().toString(36).slice(2);
+    localStorage.setItem(LS_OWNER, id);
+  }
+  return id;
+}
+
 /* ---------- Turnstile (Cloudflare human verification) ---------- */
 // The widget div lives on the login screen; the site key is injected here so it
 // only ever lives in config.js. api.js is async: if it finished loading before
@@ -402,13 +474,23 @@ async function ensureProfile() {
 /* ---------- Tabs ---------- */
 function switchTab(tab) {
   state.activeTab = tab;
-  $$(".nav-btn").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
+  $$(".nav-btn").forEach((b) => {
+    const on = b.dataset.tab === tab;
+    b.classList.toggle("active", on);
+    if (on) {
+      // The mobile bottom nav scrolls sideways — keep the active tab visible.
+      const nav = $("#main-nav");
+      nav.scrollTo({ left: b.offsetLeft - nav.clientWidth / 2 + b.clientWidth / 2 });
+    }
+  });
   $$(".tab-panel").forEach((p) => p.classList.toggle("active", p.id === `tab-${tab}`));
   // Lazy-load data for the tab (loaders render cached data or fetch)
   if (tab === "attendance") loadAttendance();
   if (tab === "grades") loadGrades();
   if (tab === "exams") loadSeating();
   if (tab === "dashboard") renderDashboard();
+  if (tab === "plan") loadPlan();
+  if (tab === "ai") loadAi();
   window.scrollTo({ top: 0 });
 }
 
@@ -426,6 +508,8 @@ document.addEventListener("click", (e) => {
   if (what === "attendance") loadAttendance(true);
   if (what === "grades") loadGrades(true);
   if (what === "exams") loadSeating(true);
+  if (what === "plan") loadPlan(true);
+  if (what === "ai") loadAi(true);
 });
 
 /* ---------- Skeletons ---------- */
@@ -439,6 +523,12 @@ function skelCards(n) {
 function emptyState(title, sub, icon = "inbox") {
   return `<div class="empty-state"><div class="empty-icon"><i data-lucide="${esc(icon)}"></i></div>
     <div class="empty-title">${esc(title)}</div><div class="empty-sub">${esc(sub)}</div></div>`;
+}
+// Same shell plus a Retry button that reuses the global data-refresh handler.
+function retryState(title, sub, refreshKey) {
+  return `<div class="empty-state"><div class="empty-icon"><i data-lucide="cloud-off"></i></div>
+    <div class="empty-title">${esc(title)}</div><div class="empty-sub">${esc(sub)}</div>
+    <div style="margin-top:16px"><button class="btn btn-ghost" data-refresh="${esc(refreshKey)}"><i data-lucide="refresh-cw"></i>Retry</button></div></div>`;
 }
 
 /* ---------- Login ---------- */
@@ -824,10 +914,10 @@ function bunkHint(row) {
   const pct = (attended / conducted) * 100;
   if (pct >= 75) {
     const n = Math.floor(attended / 0.75 - conducted);
-    return `<span class="cmp-hint ok">can miss <b>${n}</b> hr${n === 1 ? "" : "s"}</span>`;
+    return `<span class="cmp-hint ok">You can miss <b>${n}</b> more hr${n === 1 ? "" : "s"}</span>`;
   }
   const n = Math.ceil((0.75 * conducted - attended) / 0.25);
-  return `<span class="cmp-hint warn">attend <b>${n}</b> hr${n === 1 ? "" : "s"} for 75%</span>`;
+  return `<span class="cmp-hint warn">Attend the next <b>${n}</b> hr${n === 1 ? "" : "s"} to reach 75%</span>`;
 }
 
 function renderAttendance() {
@@ -865,10 +955,10 @@ function renderAttendance() {
   setHTML(sumBox, `
     <div class="sum-banner ${pctClass(pct)}">
       <div class="sum-banner-meta">
-        <div class="sum-banner-eyebrow">Overall · weighted</div>
+        <div class="sum-banner-eyebrow">Overall attendance</div>
         <div class="sum-banner-sub">${attended}/${conducted} hrs · ${groups.length} course${groups.length === 1 ? "" : "s"} · ${rows.length} component${rows.length === 1 ? "" : "s"}</div>
       </div>
-      <div class="sum-banner-pct">${pct == null ? "—" : Math.round(pct) + "%"}</div>
+      <div class="sum-banner-pct">${pct == null ? "—" : pct.toFixed(1) + "%"}</div>
     </div>`);
 
   const safe = groups.filter((g) => g.pct != null && g.pct >= 75).length;
@@ -887,9 +977,9 @@ function renderAttendance() {
       <div class="course-overall">
         <div class="co-left">
           <span class="co-eyebrow">Overall</span>
-          <span class="co-sub">Weighted (${esc(letters)}) · ${g.rows.length} component${g.rows.length === 1 ? "" : "s"}</span>
+          <span class="co-sub">Weighted avg · ${esc(letters)} · ${g.rows.length} component${g.rows.length === 1 ? "" : "s"}</span>
         </div>
-        <span class="co-pct ${pctClass(g.pct)}">${g.pct == null ? "—" : Math.round(g.pct) + "%"}</span>
+        <span class="co-pct ${pctClass(g.pct)}">${g.pct == null ? "—" : g.pct.toFixed(1) + "%"}</span>
       </div>
       <div class="cmp-list">` + g.rows.map((r, ri) => {
         const p = num(r.percentage);
@@ -897,15 +987,15 @@ function renderAttendance() {
           <span class="cmp-chip">${esc(typeLetter(r.type))}</span>
           <span class="cmp-sec">${esc(r.section || "—")}</span>
           <span class="cmp-nums">
-            <span class="cmp-pct ${pctClass(p)}">${Math.round(p)}% <span class="cmp-exact">(${esc(r.percentage)}%)</span></span>
-            <span class="cmp-frac">${esc(r.attended)}/${esc(r.conducted)} · ${esc(r.absent)} absent</span>
+            <span class="cmp-pct ${pctClass(p)}">${p.toFixed(1)}%</span>
+            <span class="cmp-frac">${esc(r.attended)}/${esc(r.conducted)} hrs · ${esc(r.absent)} absent</span>
             ${bunkHint(r)}
           </span>
         </button>`;
       }).join("") + `</div>
     </div>`;
   });
-  html += `<p class="grid-hint">Tap a component for day-by-day details.</p>`;
+  html += `<p class="grid-hint">Tap any row for the day-by-day register.</p>`;
   setHTML(box, html);
 
   box.querySelectorAll("[data-att-row]").forEach((el) =>
@@ -1075,6 +1165,646 @@ function renderSeating() {
   setHTML(box, html);
 }
 
+/* ---------- Plan: study planner + tasks (Supabase) ---------- */
+const PRIO_LABELS = ["LOW", "NORM", "HIGH"];
+
+// Today's free time: gaps between merged class blocks, plus after the last
+// class until 21:00. Slivers under 20 min (short slot breaks) are dropped.
+function freeSlotsToday() {
+  const blocks = todaysBlocks();
+  const DAY_END = 21 * 60;
+  const gaps = [];
+  for (let i = 1; i < blocks.length; i++) {
+    const prevEnd = timeToMin(blocks[i - 1].end);
+    const s = timeToMin(blocks[i].start);
+    if (s > prevEnd) gaps.push([prevEnd, s]);
+  }
+  if (blocks.length) {
+    const lastEnd = timeToMin(blocks[blocks.length - 1].end);
+    if (lastEnd < DAY_END) gaps.push([lastEnd, DAY_END]);
+  }
+  return gaps
+    .filter(([s, e]) => e - s >= 20)
+    .map(([s, e]) => ({ start: minToTime(s), end: minToTime(e), mins: e - s }));
+}
+
+// Courses for the dropdowns: timetable slot codes (type suffix stripped) plus
+// attendance course codes, deduped; names from attendance when known.
+function knownCourses() {
+  const map = new Map();
+  for (const r of state.attendance || []) {
+    if (r.course_code && !map.has(r.course_code)) map.set(r.course_code, r.course_name || "");
+  }
+  if (state.timetable) {
+    for (const d of DAY_KEYS) {
+      const day = state.timetable[d];
+      if (!day) continue;
+      for (const v of Object.values(day)) {
+        if (!v || v === "-") continue;
+        const code = parseSlot(v).code.replace(/-[A-Za-z]$/, "");
+        if (code && !map.has(code)) map.set(code, "");
+      }
+    }
+  }
+  return [...map.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+}
+
+function courseOptions({ includeNone = false, includeOther = false } = {}) {
+  let html = includeNone ? `<option value="">No course</option>` : "";
+  for (const [code, name] of knownCourses()) {
+    html += `<option value="${esc(code)}">${esc(code)}${name ? " — " + esc(name) : ""}</option>`;
+  }
+  if (includeOther) html += `<option value="Other">Other</option>`;
+  return html;
+}
+
+// Monday..Sunday of the current week as ISO strings (goal progress window).
+function weekRangeISO() {
+  const now = new Date();
+  const mon = new Date(now);
+  mon.setDate(now.getDate() - ((now.getDay() + 6) % 7));
+  const sun = new Date(mon);
+  sun.setDate(mon.getDate() + 6);
+  return [dateISO(mon), dateISO(sun)];
+}
+
+function blockMins(b) {
+  return Math.max(0, timeToMin(hhmm(b.end_time)) - timeToMin(hhmm(b.start_time)));
+}
+
+async function loadPlan(force) {
+  if (!force && state.planLoaded) { renderPlan(); return; }
+  if (!state.planDay) state.planDay = todayISO();
+  setHTML("#plan-content", skelRows(5));
+  // Free hours + course dropdowns need timetable/attendance — lazy-load them
+  // exactly like the dashboard does.
+  if (!state.timetable) {
+    try {
+      const data = await api("/fetch-timetable", { ...semParams("#tt-year", "#tt-semester"), ...cookieOnlyFields() });
+      state.timetable = data.timetable || {};
+      state.ttKey = `${$("#tt-year").value}-${$("#tt-semester").value}`;
+    } catch (err) { if (err.message === "unauthorized") return; state.timetable = {}; }
+  }
+  if (!state.attendance) {
+    try {
+      const data = await api("/fetch-attendance", { ...semParams("#att-year", "#att-semester"), ...cookieOnlyFields() });
+      state.attendance = data.attendance || [];
+      state.attKey = `${$("#att-year").value}-${$("#att-semester").value}`;
+    } catch (err) { if (err.message === "unauthorized") return; state.attendance = []; }
+  }
+  try {
+    if (MOCK_MODE) {
+      const m = mockPlanData();
+      state.planTasks = m.tasks; state.planBlocks = m.blocks; state.planGoals = m.goals;
+    } else {
+      if (!sb) throw new Error("Planner storage failed to load — check your connection and retry.");
+      const owner = ownerId();
+      const [t, b, g] = await Promise.all([
+        sb.from("tasks").select("*").eq("owner", owner).order("created_at", { ascending: true }),
+        sb.from("study_blocks").select("*").eq("owner", owner).order("start_time", { ascending: true }),
+        sb.from("goals").select("*").eq("owner", owner),
+      ]);
+      if (t.error) throw new Error(t.error.message);
+      if (b.error) throw new Error(b.error.message);
+      if (g.error) throw new Error(g.error.message);
+      state.planTasks = t.data || [];
+      state.planBlocks = b.data || [];
+      state.planGoals = g.data || [];
+    }
+    state.planLoaded = true;
+    renderPlan();
+  } catch (err) {
+    state.planLoaded = false;
+    setHTML("#plan-content", retryState("Could not load your planner", err.message, "plan"));
+  }
+}
+
+// Fields whose typed-but-unsaved values survive a re-render (e.g. toggling a
+// task while a new task title is half-typed).
+const PLAN_FIELDS = ["task-title", "task-course", "task-due", "block-course", "block-start", "block-end", "block-note", "goal-course", "goal-hours"];
+
+function renderPlan() {
+  if (state.activeTab !== "plan" || !state.planLoaded) return;
+  const box = $("#plan-content");
+  const vals = {};
+  for (const id of PLAN_FIELDS) { const el = document.getElementById(id); if (el) vals[id] = el.value; }
+
+  const today = todayISO();
+  const ttHasData = !!(state.timetable && DAY_KEYS.some((d) =>
+    state.timetable[d] && Object.values(state.timetable[d]).some((v) => v && v !== "-")));
+
+  /* --- free hours today --- */
+  let html = `<h3 class="section-title">Free hours today</h3>`;
+  if (!ttHasData) {
+    html += `<p class="tt-note" style="margin-top:0">Load the timetable to see today's free hours.</p>`;
+  } else if (todaysBlocks().length === 0) {
+    html += `<div class="free-chips"><span class="free-chip">No classes today — free until 21:00</span></div>`;
+  } else {
+    const gaps = freeSlotsToday();
+    html += gaps.length
+      ? `<div class="free-chips">` + gaps.map((g) =>
+          `<span class="free-chip">${g.start}–${g.end} · ${fmtDuration(g.mins)}</span>`).join("") + `</div>`
+      : `<p class="tt-note" style="margin-top:0">No free gaps between classes today.</p>`;
+  }
+
+  /* --- study blocks --- */
+  html += `<h3 class="section-title">Study blocks</h3>`;
+  html += `<div class="day-pills" role="tablist" aria-label="Plan day">` +
+    Array.from({ length: 7 }, (_, i) => {
+      const iso = shiftISO(i);
+      const d = new Date(); d.setDate(d.getDate() + i);
+      const label = i === 0 ? "Today" : `${DAY_KEYS[(d.getDay() + 6) % 7]} ${d.getDate()}`;
+      return `<button type="button" role="tab" aria-selected="${iso === state.planDay}"
+        class="day-pill${iso === state.planDay ? " active" : ""}" data-plan-day="${iso}">${label}</button>`;
+    }).join("") + `</div>`;
+
+  html += `<form id="block-form" class="card plan-form">
+    <div class="pf-grid">
+      <label class="field pf-span2"><span>Course</span><select id="block-course">${courseOptions({ includeOther: true })}</select></label>
+      <label class="field"><span>Start</span><input type="time" id="block-start" required /></label>
+      <label class="field"><span>End</span><input type="time" id="block-end" required /></label>
+      <label class="field pf-span4"><span>Note (optional)</span><input type="text" id="block-note" maxlength="80" placeholder="e.g. Graph problem set" /></label>
+    </div>
+    <button type="submit" class="btn btn-primary"><i data-lucide="plus"></i>Add block</button>
+  </form>`;
+
+  const dayBlocks = (state.planBlocks || [])
+    .filter((b) => b.day === state.planDay)
+    .sort((a, b) => hhmm(a.start_time).localeCompare(hhmm(b.start_time)));
+  if (dayBlocks.length === 0) {
+    html += `<div class="day-empty"><div class="empty-title">no blocks planned.</div>
+      <div class="empty-sub">Add a study block for this day above.</div></div>`;
+  } else {
+    html += `<div class="class-rows">` + dayBlocks.map((b) => `
+      <div class="class-row block-row${b.done ? " done" : ""}">
+        <div class="cr-time">
+          <span class="cr-start">${esc(hhmm(b.start_time))}</span>
+          <span class="cr-end">${esc(hhmm(b.end_time))}</span>
+          <span class="cr-slot">${fmtDuration(blockMins(b))}</span>
+        </div>
+        <div class="cr-info">
+          <span class="cr-code">${esc(b.course || "Other")}</span>
+          ${b.note ? `<span class="cr-meta">${esc(b.note)}</span>` : ""}
+        </div>
+        <div class="row-actions">
+          <button type="button" class="btn-icon row-toggle" data-block-toggle="${esc(b.id)}" aria-label="Toggle done"><i data-lucide="check"></i></button>
+          <button type="button" class="btn-icon" data-block-del="${esc(b.id)}" aria-label="Delete block"><i data-lucide="trash-2"></i></button>
+        </div>
+      </div>`).join("") + `</div>`;
+  }
+
+  /* --- weekly goals --- */
+  const [wkStart, wkEnd] = weekRangeISO();
+  const weekBlocks = (state.planBlocks || []).filter((b) => b.day >= wkStart && b.day <= wkEnd);
+  html += `<h3 class="section-title">Weekly goals</h3>`;
+  html += `<form id="goal-form" class="card plan-form">
+    <div class="pf-grid">
+      <label class="field pf-span2"><span>Course</span><select id="goal-course">${courseOptions({ includeOther: true })}</select></label>
+      <label class="field"><span>Hours / week</span><input type="number" id="goal-hours" min="1" max="40" step="0.5" required placeholder="5" /></label>
+    </div>
+    <button type="submit" class="btn btn-primary"><i data-lucide="target"></i>Set goal</button>
+  </form>`;
+  const goals = state.planGoals || [];
+  if (goals.length === 0) {
+    html += `<div class="day-empty"><div class="empty-title">no goals yet.</div>
+      <div class="empty-sub">Set a weekly hours target per course.</div></div>`;
+  } else {
+    html += `<div class="goal-list">` + goals.map((g) => {
+      const doneHrs = weekBlocks
+        .filter((b) => (b.course || "Other") === g.course)
+        .reduce((s, b) => s + blockMins(b), 0) / 60;
+      const pct = num(g.weekly_hours) > 0 ? Math.min(100, (doneHrs / num(g.weekly_hours)) * 100) : 0;
+      return `<div class="card goal-row">
+        <div class="goal-top">
+          <span class="goal-course">${esc(g.course)}</span>
+          <span class="goal-meta">${doneHrs.toFixed(1)} / ${esc(g.weekly_hours)} h this week</span>
+          <button type="button" class="btn-icon" data-goal-del="${esc(g.course)}" aria-label="Remove goal"><i data-lucide="x"></i></button>
+        </div>
+        <div class="goal-bar"><div class="goal-fill" style="width:${pct.toFixed(0)}%"></div></div>
+      </div>`;
+    }).join("") + `</div>`;
+  }
+
+  /* --- tasks --- */
+  html += `<h3 class="section-title">Tasks</h3>`;
+  html += `<form id="task-form" class="card plan-form">
+    <div class="pf-grid">
+      <label class="field pf-span4"><span>Task</span><input type="text" id="task-title" maxlength="120" required placeholder="e.g. DSA assignment 4" /></label>
+      <label class="field pf-span2"><span>Course (optional)</span><select id="task-course">${courseOptions({ includeNone: true })}</select></label>
+      <label class="field"><span>Due (optional)</span><input type="date" id="task-due" /></label>
+      <div class="field"><span>Priority</span>
+        <div class="prio-seg" role="group" aria-label="Priority">
+          ${PRIO_LABELS.map((l, i) => `<button type="button" class="prio-btn${i === state.taskPriority ? " active" : ""}" data-prio="${i}">${l}</button>`).join("")}
+        </div>
+      </div>
+    </div>
+    <button type="submit" class="btn btn-primary"><i data-lucide="plus"></i>Add task</button>
+  </form>`;
+
+  const tasks = state.planTasks || [];
+  const groups = [
+    { label: "Overdue", cls: "g-overdue", items: [] },
+    { label: "Today", cls: "g-today", items: [] },
+    { label: "Upcoming", cls: "g-upcoming", items: [] },
+    { label: "Done", cls: "g-done", items: [] },
+  ];
+  for (const t of tasks) {
+    if (t.done) groups[3].items.push(t);
+    else if (t.due_date && t.due_date < today) groups[0].items.push(t);
+    else if (t.due_date === today) groups[1].items.push(t);
+    else groups[2].items.push(t);
+  }
+  const byDue = (a, b) =>
+    String(a.due_date || "9999").localeCompare(String(b.due_date || "9999")) || num(b.priority) - num(a.priority);
+  groups.forEach((g) => g.items.sort(byDue));
+
+  if (tasks.length === 0) {
+    html += `<div class="day-empty"><div class="empty-title">no tasks yet.</div>
+      <div class="empty-sub">Add your first to-do above.</div></div>`;
+  } else {
+    for (const g of groups) {
+      if (g.items.length === 0) continue;
+      html += `<div class="task-group-label ${g.cls}">${g.label} · ${g.items.length}</div><div class="task-list">`;
+      for (const t of g.items) {
+        let due = "";
+        if (t.due_date) {
+          const cls = t.due_date < today ? "late" : t.due_date === today ? "today" : "";
+          const d = new Date(t.due_date + "T00:00:00");
+          const txt = t.due_date === today ? "today"
+            : Number.isNaN(d.getTime()) ? t.due_date
+            : d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+          due = `<span class="task-due ${cls}">${esc(t.due_date < today ? "due " + txt : txt)}</span>`;
+        }
+        const prio = Math.min(2, Math.max(0, num(t.priority)));
+        html += `<div class="task-row${t.done ? " done" : ""}" data-task-toggle="${esc(t.id)}" role="button" tabindex="0">
+          <span class="task-check" aria-hidden="true"></span>
+          <div class="task-info">
+            <span class="task-title">${esc(t.title)}</span>
+            <span class="task-meta">
+              ${t.course ? `<span>${esc(t.course)}</span>` : ""}
+              ${due}
+              <span class="prio-chip p${prio}">${PRIO_LABELS[prio]}</span>
+            </span>
+          </div>
+          <button type="button" class="btn-icon task-del" data-task-del="${esc(t.id)}" aria-label="Delete task"><i data-lucide="x"></i></button>
+        </div>`;
+      }
+      html += `</div>`;
+    }
+  }
+
+  setHTML(box, html);
+  for (const [id, v] of Object.entries(vals)) {
+    const el = document.getElementById(id);
+    if (el && v) el.value = v;
+  }
+}
+
+/* --- Plan CRUD (mock mode mutates local state only) --- */
+async function sbInsert(table, row) {
+  if (MOCK_MODE) {
+    return { id: "mock-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), ...row };
+  }
+  const { data, error } = await sb.from(table).insert({ owner: ownerId(), ...row }).select().single();
+  if (error) throw new Error(error.message);
+  return data;
+}
+async function sbUpdate(table, id, patch) {
+  if (MOCK_MODE) return;
+  const { error } = await sb.from(table).update(patch).eq("id", id).eq("owner", ownerId());
+  if (error) throw new Error(error.message);
+}
+async function sbDelete(table, id) {
+  if (MOCK_MODE) return;
+  const { error } = await sb.from(table).delete().eq("id", id).eq("owner", ownerId());
+  if (error) throw new Error(error.message);
+}
+
+// Run a mutation, toast on failure, re-render either way.
+async function planRun(fn, okMsg) {
+  try {
+    await fn();
+    if (okMsg) toast(okMsg, "success");
+  } catch (err) {
+    toast(err.message || "That didn't save — try again.", "error");
+  }
+  renderPlan();
+}
+
+$("#plan-content").addEventListener("click", (e) => {
+  const dayBtn = e.target.closest("[data-plan-day]");
+  if (dayBtn) { state.planDay = dayBtn.dataset.planDay; renderPlan(); return; }
+
+  const prio = e.target.closest("[data-prio]");
+  if (prio) {
+    state.taskPriority = +prio.dataset.prio;
+    prio.closest(".prio-seg").querySelectorAll("[data-prio]").forEach((b) =>
+      b.classList.toggle("active", b === prio));
+    return;
+  }
+
+  const bTgl = e.target.closest("[data-block-toggle]");
+  if (bTgl) {
+    const b = (state.planBlocks || []).find((x) => String(x.id) === bTgl.dataset.blockToggle);
+    if (!b) return;
+    planRun(async () => { const done = !b.done; await sbUpdate("study_blocks", b.id, { done }); b.done = done; });
+    return;
+  }
+  const bDel = e.target.closest("[data-block-del]");
+  if (bDel) {
+    const b = (state.planBlocks || []).find((x) => String(x.id) === bDel.dataset.blockDel);
+    if (!b) return;
+    planRun(async () => {
+      await sbDelete("study_blocks", b.id);
+      state.planBlocks = state.planBlocks.filter((x) => x !== b);
+    }, "Block deleted");
+    return;
+  }
+
+  const tDel = e.target.closest("[data-task-del]");
+  if (tDel) {
+    const t = (state.planTasks || []).find((x) => String(x.id) === tDel.dataset.taskDel);
+    if (!t) return;
+    planRun(async () => {
+      await sbDelete("tasks", t.id);
+      state.planTasks = state.planTasks.filter((x) => x !== t);
+    }, "Task deleted");
+    return;
+  }
+  const tTgl = e.target.closest("[data-task-toggle]");
+  if (tTgl) {
+    const t = (state.planTasks || []).find((x) => String(x.id) === tTgl.dataset.taskToggle);
+    if (!t) return;
+    planRun(async () => { const done = !t.done; await sbUpdate("tasks", t.id, { done }); t.done = done; });
+    return;
+  }
+
+  const gDel = e.target.closest("[data-goal-del]");
+  if (gDel) {
+    const course = gDel.dataset.goalDel;
+    planRun(async () => {
+      if (!MOCK_MODE) {
+        const { error } = await sb.from("goals").delete().eq("owner", ownerId()).eq("course", course);
+        if (error) throw new Error(error.message);
+      }
+      state.planGoals = state.planGoals.filter((g) => g.course !== course);
+    }, "Goal removed");
+  }
+});
+
+// Task rows are divs with role="button" — make Enter/Space toggle them.
+$("#plan-content").addEventListener("keydown", (e) => {
+  if ((e.key === "Enter" || e.key === " ") && e.target.matches("[data-task-toggle]")) {
+    e.preventDefault();
+    e.target.click();
+  }
+});
+
+$("#plan-content").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const id = e.target.id;
+
+  if (id === "task-form") {
+    const title = $("#task-title").value.trim();
+    if (!title) return;
+    const task = {
+      title,
+      course: $("#task-course").value,
+      due_date: $("#task-due").value || null,
+      priority: state.taskPriority,
+      done: false,
+    };
+    planRun(async () => { state.planTasks.push(await sbInsert("tasks", task)); }, "Task added");
+  }
+
+  if (id === "block-form") {
+    const start = $("#block-start").value;
+    const end = $("#block-end").value;
+    if (!start || !end) { toast("Pick a start and end time.", "error"); return; }
+    if (timeToMin(end) <= timeToMin(start)) { toast("End time must be after start time.", "error"); return; }
+    const block = {
+      course: $("#block-course").value || "Other",
+      day: state.planDay,
+      start_time: start,
+      end_time: end,
+      note: $("#block-note").value.trim(),
+      done: false,
+    };
+    planRun(async () => { state.planBlocks.push(await sbInsert("study_blocks", block)); }, "Block added");
+  }
+
+  if (id === "goal-form") {
+    const course = $("#goal-course").value || "Other";
+    const hours = num($("#goal-hours").value);
+    if (hours <= 0) { toast("Hours must be more than 0.", "error"); return; }
+    planRun(async () => {
+      if (!MOCK_MODE) {
+        const { error } = await sb.from("goals")
+          .upsert({ owner: ownerId(), course, weekly_hours: hours }, { onConflict: "owner,course" });
+        if (error) throw new Error(error.message);
+      }
+      const g = state.planGoals.find((x) => x.course === course);
+      if (g) g.weekly_hours = hours; else state.planGoals.push({ course, weekly_hours: hours });
+    }, "Goal saved");
+  }
+});
+
+/* ---------- AI chat (POST /ai/chat) ---------- */
+const AI_QUICK = {
+  plan: "Plan my day: using today's free slots between my classes, suggest a concrete study plan with times.",
+  attention: "What needs attention? Check my attendance and pending tasks, then tell me what to focus on first.",
+  week: "Summarize my week: classes, attendance risks and study goals.",
+};
+
+function loadAiHistory() {
+  try { state.aiHistory = JSON.parse(localStorage.getItem(LS_AI_HISTORY) || "[]"); }
+  catch { state.aiHistory = []; }
+  if (!Array.isArray(state.aiHistory)) state.aiHistory = [];
+}
+
+function pushAi(role, content) {
+  state.aiHistory.push({ role, content });
+  while (state.aiHistory.length > 20) state.aiHistory.shift();
+  try { localStorage.setItem(LS_AI_HISTORY, JSON.stringify(state.aiHistory)); } catch { /* full — keep in memory */ }
+}
+
+async function loadAi(force) {
+  if (!force && state.aiStatus) { renderAi(); return; }
+  setHTML("#ai-content", `<div class="spinner-center"><div class="spinner"></div></div>`);
+  if (MOCK_MODE) { state.aiStatus = "on"; renderAi(); return; }
+  try {
+    let res;
+    try { res = await fetch(`${API_BASE}/ai/status`); }
+    catch { throw new Error("Can't reach the server. Check your internet and try again."); }
+    if (!res.ok) throw new Error(friendlyHttpError(res));
+    const data = await res.json();
+    state.aiStatus = data.enabled ? "on" : "off";
+  } catch (err) {
+    state.aiStatus = null;
+    setHTML("#ai-content", retryState("Could not reach AI", err.message, "ai"));
+    return;
+  }
+  renderAi();
+}
+
+function aiBubbleHTML(m) {
+  const cls = m.role === "user" ? "user" : m.role === "error" ? "err" : "ai";
+  return `<div class="chat-bubble ${cls}">${esc(m.content)}</div>`;
+}
+
+function renderAi() {
+  if (state.activeTab !== "ai") return;
+  const box = $("#ai-content");
+  if (state.aiStatus !== "on") {
+    setHTML(box, emptyState("AI isn't configured yet", "Check back soon.", "bot"));
+    return;
+  }
+  const inputEl = document.getElementById("ai-input");
+  const inputVal = inputEl ? inputEl.value : "";
+  const dis = state.aiSending ? " disabled" : "";
+
+  let html = `<div class="chat-list" id="ai-list">`;
+  if (state.aiHistory.length === 0) {
+    html += `<div class="chat-bubble ai">Hey! Ask me about your classes, attendance or tasks — or tap a shortcut below.</div>`;
+  }
+  html += state.aiHistory.map(aiBubbleHTML).join("");
+  if (state.aiSending) {
+    html += `<div class="chat-bubble ai thinking" aria-label="Thinking"><span class="tdot"></span><span class="tdot"></span><span class="tdot"></span></div>`;
+  }
+  html += `</div>
+    <div class="chat-quick">
+      <button type="button" class="quick-chip" data-ai-quick="plan"${dis}>Plan my day</button>
+      <button type="button" class="quick-chip" data-ai-quick="attention"${dis}>What needs attention?</button>
+      <button type="button" class="quick-chip" data-ai-quick="week"${dis}>Summarize my week</button>
+    </div>
+    <form id="ai-form" class="chat-form">
+      <input type="text" id="ai-input" maxlength="500" placeholder="Ask about classes, attendance, tasks…" autocomplete="off"${dis} />
+      <button type="submit" class="chat-send" aria-label="Send"${dis}><i data-lucide="send-horizontal"></i></button>
+    </form>`;
+  setHTML(box, html);
+
+  const input = document.getElementById("ai-input");
+  if (input && inputVal) input.value = inputVal;
+  const list = document.getElementById("ai-list");
+  if (list) list.scrollTop = list.scrollHeight;
+}
+
+// Compact snapshot of the student's situation, sent with every message.
+function buildAiContext() {
+  const lines = [];
+  const p = state.profile || {};
+  const who = p.name ? `${p.name}${p.roll_no ? " (" + p.roll_no + ")" : ""}` : (state.creds ? state.creds.username : "");
+  if (who) lines.push(`Student: ${who}`);
+  const blocks = todaysBlocks();
+  lines.push(blocks.length
+    ? "Today's classes: " + blocks.map((b) => `${b.code} ${b.start}-${b.end}`).join(", ")
+    : "No classes today.");
+  if (state.attendance && state.attendance.length) {
+    const g = new Map();
+    for (const r of state.attendance) {
+      const k = r.course_code || "?";
+      const cur = g.get(k) || { a: 0, c: 0 };
+      cur.a += num(r.attended); cur.c += num(r.conducted);
+      g.set(k, cur);
+    }
+    const parts = [];
+    for (const [k, v] of g) parts.push(`${k} ${v.c ? Math.round((v.a / v.c) * 100) + "%" : "—"}`);
+    lines.push("Attendance: " + parts.join(", "));
+  }
+  const open = (state.planTasks || []).filter((t) => !t.done);
+  lines.push(`Pending tasks: ${open.length}` +
+    (open.length ? " (" + open.slice(0, 3).map((t) => t.title).join("; ") + ")" : ""));
+  const free = freeSlotsToday();
+  if (free.length) lines.push("Free slots today: " + free.map((f) => `${f.start}-${f.end}`).join(", "));
+  let s = lines.join("\n");
+  if (s.length > 800) s = s.slice(0, 797) + "...";
+  return s;
+}
+
+// Like api(), but surfaces the backend's detail/message for 429/403/503 so it
+// can be shown as an in-chat error bubble.
+async function aiChat(message, history, context) {
+  const fd = new FormData();
+  if (state.creds) {
+    fd.set("username", state.creds.username);
+    fd.set("password", state.creds.password);
+  }
+  for (const [k, v] of Object.entries(cookieOnlyFields())) fd.set(k, v);
+  fd.set("message", message);
+  fd.set("history", JSON.stringify(history));
+  fd.set("context", context);
+
+  let res;
+  try {
+    res = await fetch(`${API_BASE}/ai/chat`, { method: "POST", body: fd });
+  } catch {
+    throw new Error("Can't reach the server. Check your internet and try again.");
+  }
+
+  if (res.status === 401) {
+    clearSession();
+    showLogin();
+    toast("Session expired. Please sign in again.", "error");
+    throw new Error("unauthorized");
+  }
+  if (!res.ok) {
+    let detail = "";
+    try { const j = await res.json(); detail = j.detail || j.message || ""; } catch { /* non-JSON error body */ }
+    if (res.status === 429) throw new Error(detail || "Rate limited — slow down a bit.");
+    if (res.status === 403) throw new Error(detail || "AI access denied.");
+    if (res.status === 503) throw new Error(detail || "AI is unavailable right now. Try again later.");
+    throw new Error(detail || friendlyHttpError(res));
+  }
+  const data = await res.json();
+  if (data.cookies) saveCookies(data.cookies);
+  if (data.success === false) throw new Error(data.message || data.detail || "Request failed");
+  return String(data.reply || "").trim() || "(empty reply)";
+}
+
+async function sendAi(text) {
+  text = String(text || "").trim();
+  if (!text || state.aiSending || state.aiStatus !== "on") return;
+  const input = document.getElementById("ai-input");
+  if (input) input.value = "";
+  state.aiSending = true;
+  pushAi("user", text);
+  renderAi();
+  try {
+    let reply;
+    if (MOCK_MODE) {
+      await new Promise((r) => setTimeout(r, 700));
+      reply = MOCK_AI_REPLY;
+    } else {
+      // Prior turns only (the current message goes in "message"), last 10,
+      // error bubbles excluded from what the backend sees.
+      const prior = state.aiHistory
+        .filter((m) => m.role === "user" || m.role === "assistant")
+        .slice(0, -1)
+        .slice(-10)
+        .map((m) => ({ role: m.role, content: m.content }));
+      reply = await aiChat(text, prior, buildAiContext());
+    }
+    pushAi("assistant", reply);
+  } catch (err) {
+    if (err.message === "unauthorized") { state.aiSending = false; return; }
+    pushAi("error", err.message || "Something went wrong.");
+  }
+  state.aiSending = false;
+  renderAi();
+}
+
+$("#ai-content").addEventListener("submit", (e) => {
+  if (e.target.id !== "ai-form") return;
+  e.preventDefault();
+  const input = document.getElementById("ai-input");
+  sendAi(input ? input.value : "");
+});
+
+$("#ai-content").addEventListener("click", (e) => {
+  const q = e.target.closest("[data-ai-quick]");
+  if (q && AI_QUICK[q.dataset.aiQuick]) sendAi(AI_QUICK[q.dataset.aiQuick]);
+});
+
 /* ---------- Selectors ---------- */
 ["#tt-year", "#att-year"].forEach((s) => buildYearOptions($(s)));
 
@@ -1093,6 +1823,7 @@ $("#timetable-content").addEventListener("click", (e) => {
 
 /* ---------- Init ---------- */
 loadStored();
+loadAiHistory();
 if (state.creds && state.cookies) {
   showApp();
 } else {
