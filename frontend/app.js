@@ -2915,12 +2915,30 @@ async function sendAi(text) {
       if (!thoughtEl) {
         thoughtEl = document.createElement("div");
         thoughtEl.className = "chat-bubble thought";
+        thoughtEl.title = "tap to expand";
+        thoughtEl.addEventListener("click", () => {
+          const open = thoughtEl.classList.toggle("open");
+          if (open) thoughtEl.textContent = thoughtEl.dataset.full || "";
+          else thoughtEl.textContent = thoughtEl.dataset.preview || "";
+        });
         list.appendChild(thoughtEl);
       }
-      thoughtEl.textContent = thoughtText.length > 500 ? "…" + thoughtText.slice(-500) : thoughtText;
+      thoughtEl.dataset.full = thoughtText;
+      // single-line preview, trimmed at a word boundary so nothing looks cut off
+      let tail = thoughtText.slice(-120);
+      const sp = tail.indexOf(" ");
+      if (thoughtText.length > 120 && sp > 0) tail = tail.slice(sp + 1);
+      thoughtEl.dataset.preview = thoughtText.length > 120 ? "… " + tail : tail;
+      if (!thoughtEl.classList.contains("open")) thoughtEl.textContent = thoughtEl.dataset.preview;
+      thoughtEl.scrollTop = thoughtEl.scrollHeight;
     }
     if (kind === "t" && replyText) {
       if (thinking) thinking.remove();
+      if (thoughtEl && !thoughtEl.classList.contains("done")) {
+        thoughtEl.classList.add("done");
+        thoughtEl.textContent = "done thinking";
+        thoughtEl.title = "tap to see the reasoning";
+      }
       if (!streamEl) {
         streamEl = document.createElement("div");
         streamEl.className = "chat-bubble ai md streaming";

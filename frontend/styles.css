@@ -2548,20 +2548,34 @@ img { max-width: 100%; }
   font-size: 0.72rem;
   font-style: italic;
   line-height: 1.45;
-  max-height: 7.5em;
-  overflow-y: auto;
-  scrollbar-width: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
 }
-.chat-bubble.thought::-webkit-scrollbar { display: none; }
 .chat-bubble.thought::before {
   content: "thinking…";
-  display: block;
+  display: inline-block;
   color: var(--purple, #7c5cfc);
   font-style: normal;
   font-size: 0.66rem;
   letter-spacing: 0.08em;
-  margin-bottom: 4px;
+  margin-right: 6px;
 }
+.chat-bubble.thought.open {
+  white-space: pre-wrap;
+  max-height: 40dvh;
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+.chat-bubble.thought.open::-webkit-scrollbar { display: none; }
+.chat-bubble.thought.done {
+  white-space: nowrap;
+  opacity: 0.7;
+  font-size: 0.66rem;
+  padding: 6px 10px;
+}
+.chat-bubble.thought.done::before { content: ""; margin: 0; }
 
 /* ============ Attendance: bunk simulator + header target chips ============ */
 

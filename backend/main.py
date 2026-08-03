@@ -955,7 +955,7 @@ async def fetch_profile(
 # AI calls never touch the ERP — they only require proof of a prior login
 # (php_sess_id + csrf_cookie) so random traffic can't burn the API key.
 KIMI_API_KEY = os.environ.get("KIMI_API_KEY", "")
-KIMI_MODEL = os.environ.get("KIMI_MODEL", "kimi-k2.5")
+KIMI_MODEL = os.environ.get("KIMI_MODEL", "moonshot-v1-8k")
 AI_ALLOWED_USERS = {u.strip() for u in os.environ.get("AI_ALLOWED_USERS", "2600031735").split(",") if u.strip()}
 
 AI_SYSTEM_PROMPT = (
