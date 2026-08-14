@@ -3344,6 +3344,13 @@ if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => {
     navigator.serviceWorker.register("sw.js").catch(() => { /* offline shell is a bonus */ });
   });
+  // A newer sw.js taking over means this page is running a stale shell (which may
+  // call removed/changed APIs). Reload once to land on the fresh version.
+  if (navigator.serviceWorker.controller) {
+    navigator.serviceWorker.addEventListener("controllerchange", () => {
+      if (!window.__swReloaded) { window.__swReloaded = true; location.reload(); }
+    });
+  }
 }
 // Course titles arrive async — repaint whatever is already on screen once the
 // catalog lands so codes swap to full names without a manual refresh.

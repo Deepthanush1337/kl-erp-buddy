@@ -267,11 +267,57 @@ async def login_with_retries(client: httpx.AsyncClient, username: str, password:
     for attempt in range(attempts):
         if attempt > 0:
             await asyncio.sleep(random.uniform(1.0, 2.0))
-        response, cookies = await auto_login(client, username, password, seed_cookies=cookies)
+        try:
+            response, cookies = await auto_login(client, username, password, seed_cookies=cookies)
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 429:
+                logger.warning("[LOGIN] ERP 429 rate-limited (attempt %d for %s)", attempt + 1, username)
+                if attempt < attempts - 1:
+                    await asyncio.sleep(random.uniform(4.0, 8.0))
+                    continue
+                raise HTTPException(status_code=503, detail="KL ERP is rate-limiting logins right now. Wait a minute and try again.")
+            raise
         if not is_login_failed(response):
             return response, cookies
         logger.warning("[LOGIN] attempt %d rejected (bad captcha or creds), retrying", attempt + 1)
     raise HTTPException(status_code=401, detail="Invalid username or password.")
+
+
+# ------------------ SESSION POOL + LOGIN DEDUP ------------------
+# The ERP rate-limits site/login per IP (~2 rapid logins -> 429). All users of
+# this backend share one egress IP, so we aggressively avoid duplicate logins:
+# (a) pooled sessions reused for SESSION_TTL seconds, (b) concurrent logins for
+# the same user share one in-flight task instead of firing N captcha runs.
+SESSION_TTL = 20 * 60
+_session_pool: dict[str, tuple[float, dict, str]] = {}   # username -> (expiry, cookies, csrf)
+_inflight_logins: dict[str, asyncio.Task] = {}
+
+
+async def _login_fresh(username: str, password: str, seed_cookies: dict):
+    async with httpx.AsyncClient(verify=True, limits=limits_pool, headers=DEFAULT_HEADERS, http2=True) as c:
+        return await login_with_retries(c, username, password, seed_cookies=seed_cookies)
+
+
+async def erp_login(username: str, password: str, seed_cookies: dict | None = None, force: bool = False):
+    """Deduplicated ERP login. Returns (response|None, cookies, csrf).
+    response is None when a pooled session was reused."""
+    if not force:
+        ent = _session_pool.get(username)
+        if ent and ent[0] > time.time():
+            return None, dict(ent[1]), ent[2]
+    task = _inflight_logins.get(username)
+    if task is None:
+        task = asyncio.create_task(_login_fresh(username, password, seed_cookies or {}))
+        _inflight_logins[username] = task
+        task.add_done_callback(lambda _t: _inflight_logins.pop(username, None))
+    response, cookies = await task
+    csrf = extract_csrf(response.text)
+    _session_pool[username] = (time.time() + SESSION_TTL, dict(cookies), csrf)
+    return response, cookies, csrf
+
+
+def erp_session_drop(username: str) -> None:
+    _session_pool.pop(username, None)
 
 
 def build_cookie_jar(php_sess_id: str, csrf_cookie: str, device_id: str, server_id: str) -> dict:
@@ -677,8 +723,9 @@ async def login(request: Request, username: str = Form(...), password: str = For
         raise HTTPException(status_code=403, detail="Human verification failed. Please retry the checkbox.")
     try:
         async with httpx.AsyncClient(verify=True, limits=limits_pool, headers=DEFAULT_HEADERS, http2=True) as client:
-            login_response, cookies = await login_with_retries(client, username, password, seed_cookies={})
-            fresh_csrf = extract_csrf(login_response.text)
+            # /login always forces a fresh verification — a pooled session must
+            # never let a wrong password through.
+            login_response, cookies, fresh_csrf = await erp_login(username, password, force=True)
             log_event(username, "login")
             profile = extract_profile(login_response.text)
             if profile.get("name"):
@@ -732,15 +779,13 @@ async def fetch_attendance(
     try:
         async with httpx.AsyncClient(verify=True, limits=limits_pool, headers=DEFAULT_HEADERS, http2=True) as client:
             if not php_sess_id or not csrf_cookie:
-                login_response, cookie_jar = await login_with_retries(client, username, password, seed_cookies={})
+                login_response, cookie_jar, page_csrf = await erp_login(username, password)
                 php_sess_id = cookie_jar.get("PHPSESSID", "")
-                page_csrf = extract_csrf(login_response.text)
             else:
                 landing = f"{BASE_URL}/index.php?r=studentattendance%2Fstudentdailyattendance"
                 get_response, cookie_jar = await _follow_redirects_collecting_cookies(client, "GET", landing, cookie_jar, timeout=15)
                 if is_login_failed(get_response):
-                    login_response, cookie_jar = await login_with_retries(client, username, password, seed_cookies=cookie_jar)
-                    page_csrf = extract_csrf(login_response.text)
+                    login_response, cookie_jar, page_csrf = await erp_login(username, password, seed_cookies=cookie_jar, force=True)
                 else:
                     page_csrf = extract_csrf(get_response.text)
 
@@ -751,8 +796,7 @@ async def fetch_attendance(
                 client, "POST", attendance_url, cookie_jar, timeout=15, data=payload(page_csrf)
             )
             if is_login_failed(post_response):
-                login_response, cookie_jar = await login_with_retries(client, username, password, seed_cookies=cookie_jar)
-                page_csrf = extract_csrf(login_response.text)
+                login_response, cookie_jar, page_csrf = await erp_login(username, password, seed_cookies=cookie_jar, force=True)
                 post_response, cookie_jar = await _follow_redirects_collecting_cookies(
                     client, "POST", attendance_url, cookie_jar, timeout=15, data=payload(page_csrf)
                 )
@@ -830,12 +874,12 @@ async def fetch_timetable(
     try:
         async with httpx.AsyncClient(verify=True, limits=limits_pool, headers=DEFAULT_HEADERS, http2=True) as client:
             if not php_sess_id or not csrf_cookie:
-                _, cookie_jar = await login_with_retries(client, username, password, seed_cookies={})
+                _, cookie_jar, _c = await erp_login(username, password)
                 php_sess_id = cookie_jar.get("PHPSESSID", "")
 
             response = await client.get(tt_url, cookies=cookie_jar, timeout=15)
             if response.status_code in (301, 302, 303, 500) or is_login_failed(response):
-                _, cookie_jar = await login_with_retries(client, username, password, seed_cookies=cookie_jar)
+                _, cookie_jar, _c = await erp_login(username, password, seed_cookies=cookie_jar, force=True)
                 response = await client.get(tt_url, cookies=cookie_jar, timeout=15)
             response.raise_for_status()
             html = response.text
@@ -896,16 +940,15 @@ async def fetch_register_detail(
     try:
         async with httpx.AsyncClient(verify=True, limits=limits_pool, headers=DEFAULT_HEADERS, http2=True) as client:
             if not php_sess_id or not csrf_cookie:
-                login_response, cookie_jar = await login_with_retries(client, username, password, seed_cookies={})
+                _, cookie_jar, active_csrf = await erp_login(username, password)
                 php_sess_id = cookie_jar.get("PHPSESSID", "")
-                active_csrf = extract_csrf(login_response.text)
             else:
                 active_csrf = unquote(csrf_cookie)
 
             response = await client.get(f"{register_url}&_csrf={active_csrf}", cookies=cookie_jar, timeout=15)
             if response.status_code in (301, 302, 303, 500) or is_login_failed(response):
-                login_response, cookie_jar = await login_with_retries(client, username, password, seed_cookies=cookie_jar)
-                active_csrf = extract_csrf(login_response.text) or cookie_jar.get("_csrf", "")
+                _, cookie_jar, active_csrf = await erp_login(username, password, seed_cookies=cookie_jar, force=True)
+                active_csrf = active_csrf or cookie_jar.get("_csrf", "")
                 response = await client.get(f"{register_url}&_csrf={active_csrf}", cookies=cookie_jar, timeout=15)
             response.raise_for_status()
             html = response.text
@@ -960,12 +1003,12 @@ async def fetch_cgpa(
     try:
         async with httpx.AsyncClient(verify=True, limits=limits_pool, headers=DEFAULT_HEADERS, http2=True) as client:
             if not php_sess_id or not csrf_cookie:
-                _, cookie_jar = await login_with_retries(client, username, password, seed_cookies={})
+                _, cookie_jar, _c = await erp_login(username, password)
                 php_sess_id = cookie_jar.get("PHPSESSID", "")
 
             response = await client.get(cgpa_url, cookies=cookie_jar, timeout=15)
             if response.status_code in (301, 302, 303, 500) or is_login_failed(response):
-                _, cookie_jar = await login_with_retries(client, username, password, seed_cookies=cookie_jar)
+                _, cookie_jar, _c = await erp_login(username, password, seed_cookies=cookie_jar, force=True)
                 response = await client.get(cgpa_url, cookies=cookie_jar, timeout=15)
             response.raise_for_status()
             html = response.text
@@ -1027,7 +1070,7 @@ async def fetch_marks_detail(
         async with httpx.AsyncClient(verify=True, limits=limits_pool, headers=DEFAULT_HEADERS, http2=True) as client:
             response = await client.get(url, cookies=cookie_jar, timeout=15)
             if response.status_code in (301, 302, 303, 500) or is_login_failed(response):
-                _, cookie_jar = await login_with_retries(client, username, password, seed_cookies=cookie_jar)
+                _, cookie_jar, _c = await erp_login(username, password, seed_cookies=cookie_jar, force=True)
                 response = await client.get(url, cookies=cookie_jar, timeout=15)
             response.raise_for_status()
             html = response.text
@@ -1074,12 +1117,12 @@ async def fetch_seating_plan(
     try:
         async with httpx.AsyncClient(verify=True, limits=limits_pool, headers=DEFAULT_HEADERS, http2=True) as client:
             if not php_sess_id or not csrf_cookie:
-                _, cookie_jar = await login_with_retries(client, username, password, seed_cookies={})
+                _, cookie_jar, _c = await erp_login(username, password)
                 php_sess_id = cookie_jar.get("PHPSESSID", "")
 
             response = await client.get(seating_url, cookies=cookie_jar, timeout=15)
             if response.status_code in (301, 302, 303, 500) or is_login_failed(response):
-                _, cookie_jar = await login_with_retries(client, username, password, seed_cookies=cookie_jar)
+                _, cookie_jar, _c = await erp_login(username, password, seed_cookies=cookie_jar, force=True)
                 response = await client.get(seating_url, cookies=cookie_jar, timeout=15)
             response.raise_for_status()
             html = response.text
@@ -1135,12 +1178,12 @@ async def fetch_profile(
     try:
         async with httpx.AsyncClient(verify=True, limits=limits_pool, headers=DEFAULT_HEADERS, http2=True) as client:
             if not php_sess_id or not csrf_cookie:
-                _, cookie_jar = await login_with_retries(client, username, password, seed_cookies={})
+                _, cookie_jar, _c = await erp_login(username, password)
                 php_sess_id = cookie_jar.get("PHPSESSID", "")
 
             response = await client.get(dash_url, cookies=cookie_jar, timeout=15)
             if response.status_code in (301, 302, 303, 500) or is_login_failed(response):
-                _, cookie_jar = await login_with_retries(client, username, password, seed_cookies=cookie_jar)
+                _, cookie_jar, _c = await erp_login(username, password, seed_cookies=cookie_jar, force=True)
                 response = await client.get(dash_url, cookies=cookie_jar, timeout=15)
             response.raise_for_status()
             page = response.text
