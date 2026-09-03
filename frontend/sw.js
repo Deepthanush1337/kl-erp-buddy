@@ -4,7 +4,7 @@
    cached index.html when offline. Cross-origin traffic (the API, CDNs) and
    non-GET requests are never intercepted — default network passthrough. */
 
-const CACHE = "kl-erp-v2";
+const CACHE = "kl-erp-v3";
 
 // Relative paths resolve against this script's URL, so the cache stays
 // scope-correct when the app is served from a subpath (e.g. /klu/).
