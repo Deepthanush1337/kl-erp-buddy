@@ -378,8 +378,10 @@ def extract_profile(page_html: str) -> dict:
     m = re.search(r'<img[^>]+src="(data:\s*image/[a-zA-Z]+;base64,[^"]+)"', page_html, re.IGNORECASE)
     if m:
         candidate = m.group(1).replace("data: image", "data:image")
-        if len(candidate) < 400_000:  # sanity cap (~300 KB base64)
+        if len(candidate) < 400_000:  # small enough to ship as-is (~300 KB base64)
             photo = candidate
+        elif len(candidate) < 20_000_000:  # too heavy to ship raw — downscale to 256px
+            photo = make_thumbnail(candidate, size=256)
 
     profile = {
         "name": field("NAME"),
