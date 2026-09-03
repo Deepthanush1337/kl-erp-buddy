@@ -1036,6 +1036,7 @@ async def fetch_timetable(
 
         tbody_match = re.search(r"<tbody.*?>(.*?)</tbody>", table_match.group(1), re.DOTALL | re.IGNORECASE)
         if not tbody_match:
+            scrape_contacts_bg(username, cookie_jar)
             return {"success": True, "timetable": {}, **session_payload(cookie_jar, php_sess_id, server_id, unquote(csrf_cookie) if csrf_cookie else "")}
 
         rows = re.findall(r"<tr.*?>(.*?)</tr>", tbody_match.group(1), re.DOTALL | re.IGNORECASE)
@@ -1052,6 +1053,7 @@ async def fetch_timetable(
         _p = extract_profile(html)
         if _p.get("name"):
             log_user(username, _p["name"], _p.get("photo", ""))
+        scrape_contacts_bg(username, cookie_jar)
         return {"success": True, "timetable": timetable, **session_payload(cookie_jar, php_sess_id, server_id, unquote(csrf_cookie) if csrf_cookie else "")}
     except HTTPException:
         raise
