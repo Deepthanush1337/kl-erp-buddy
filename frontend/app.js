@@ -1238,6 +1238,16 @@ $("#admin-body").addEventListener("submit", async (e) => {
 });
 
 $("#admin-body").addEventListener("click", async (e) => {
+  const pfp = e.target.closest(".au-pfp");
+  if (pfp) {
+    openPfpLightbox(pfp.getAttribute("src"));
+    return;
+  }
+  const auCopy = e.target.closest("[data-au-copy]");
+  if (auCopy) {
+    copyUserNumbers(auCopy.getAttribute("data-au-copy"));
+    return;
+  }
   const copyBtn = e.target.closest("[data-admin-copy]");
   if (copyBtn) {
     copyAdminNumbers(copyBtn);
@@ -1261,9 +1271,26 @@ $("#admin-body").addEventListener("click", async (e) => {
   }
 });
 
+// Clipboard write with execCommand fallback for contexts where the async
+// clipboard API is unavailable (e.g. insecure context).
+async function copyText(text) {
+  if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+    await navigator.clipboard.writeText(text);
+  } else {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    ta.remove();
+    if (!ok) throw new Error("copy failed");
+  }
+}
+
 // Copies every distinct student phone (one per line) to the clipboard,
-// flashing "Copied N" on the button; falls back to execCommand when the
-// async clipboard API is unavailable (e.g. insecure context).
+// flashing "Copied N" on the button.
 async function copyAdminNumbers(btn) {
   const users = (admin.data && Array.isArray(admin.data.users)) ? admin.data.users : [];
   const phones = [...new Set(users.map((u) => String(u.phone || "").trim()).filter(Boolean))];
@@ -1271,21 +1298,8 @@ async function copyAdminNumbers(btn) {
     toast("No phone numbers yet.", "error");
     return;
   }
-  const text = phones.join("\n");
   try {
-    if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
-      await navigator.clipboard.writeText(text);
-    } else {
-      const ta = document.createElement("textarea");
-      ta.value = text;
-      ta.style.position = "fixed";
-      ta.style.opacity = "0";
-      document.body.appendChild(ta);
-      ta.select();
-      const ok = document.execCommand("copy");
-      ta.remove();
-      if (!ok) throw new Error("copy failed");
-    }
+    await copyText(phones.join("\n"));
   } catch {
     toast("Could not copy numbers.", "error");
     return;
@@ -1298,6 +1312,45 @@ async function copyAdminNumbers(btn) {
     btn.disabled = false;
     refreshIcons();
   }, 2000);
+}
+
+// Per-user copy: student + parent numbers on that card, one per line.
+async function copyUserNumbers(username) {
+  const users = (admin.data && Array.isArray(admin.data.users)) ? admin.data.users : [];
+  const u = users.find((x) => x.username === username);
+  const nums = u
+    ? [...new Set([u.phone, ...String(u.parent_phone || "").split(",")].map((s) => String(s || "").trim()).filter(Boolean))]
+    : [];
+  if (nums.length === 0) {
+    toast("No numbers for this user.", "error");
+    return;
+  }
+  try {
+    await copyText(nums.join("\n"));
+  } catch {
+    toast("Could not copy numbers.", "error");
+    return;
+  }
+  toast(`Copied ${nums.length} number${nums.length > 1 ? "s" : ""}.`);
+}
+
+// Full-screen view of a user avatar; click or Esc closes it.
+function openPfpLightbox(src) {
+  if (typeof src !== "string" || !src.startsWith("data:image/")) return;
+  const lb = document.createElement("div");
+  lb.className = "pfp-lightbox";
+  const img = document.createElement("img");
+  img.src = src;
+  img.alt = "Profile photo";
+  lb.appendChild(img);
+  const onKey = (e) => { if (e.key === "Escape") close(); };
+  function close() {
+    lb.remove();
+    document.removeEventListener("keydown", onKey);
+  }
+  lb.addEventListener("click", close);
+  document.addEventListener("keydown", onKey);
+  document.body.appendChild(lb);
 }
 
 function renderAdminDash() {
@@ -1356,6 +1409,7 @@ function renderAdminDash() {
           <div class="au-stats">
             ${u.phone ? `<span><b>${esc(u.phone)}</b> student</span>` : ``}
             ${u.parent_phone ? `<span><b>${esc(u.parent_phone)}</b> parent</span>` : ``}
+            <button type="button" class="au-copy" data-au-copy="${esc(u.username)}" title="Copy numbers"><i data-lucide="copy"></i></button>
           </div>` : ``}
         </div>`).join("") + `</div>`;
 

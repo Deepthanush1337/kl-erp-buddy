@@ -2835,3 +2835,34 @@ img { max-width: 100%; }
   font-weight: 400;
   margin-left: 6px;
 }
+
+/* Admin: per-user copy button + avatar lightbox */
+.au-pfp { cursor: zoom-in; }
+.au-copy {
+  margin-left: auto;
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 2px;
+  display: inline-flex;
+  align-items: center;
+}
+.au-copy:hover { color: var(--lime); }
+.au-copy svg { width: 13px; height: 13px; }
+
+.pfp-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 190; /* above admin overlay (180), below toasts (200) */
+  background: rgba(0, 0, 0, 0.85);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: zoom-out;
+}
+.pfp-lightbox img {
+  max-width: 85vmin;
+  max-height: 85vmin;
+  border-radius: 12px;
+}

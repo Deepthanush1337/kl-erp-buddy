@@ -678,7 +678,7 @@ def log_user(username: str, name: str, photo: str = "") -> None:
     when the scraped page had one) for the admin page."""
     if not SUPABASE_SERVICE_KEY or not username or not name:
         return
-    thumb = make_thumbnail(photo) if photo else ""
+    thumb = make_thumbnail(photo, size=256) if photo else ""
 
     async def _send():
         payload = {"username": username, "name": name, "last_seen": datetime.utcnow().isoformat() + "Z"}
