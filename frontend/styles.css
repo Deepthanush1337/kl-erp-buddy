@@ -2438,7 +2438,9 @@ img { max-width: 100%; }
 }
 
 .au-top { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); }
+.au-pfp { width: 28px; height: 28px; border-radius: 50%; object-fit: cover; flex: none; }
 .au-name {
+  flex: 1;
   font-weight: 700;
   font-size: 0.92rem;
   font-family: var(--font-mono);

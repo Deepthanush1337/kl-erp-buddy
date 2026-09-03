@@ -1343,6 +1343,7 @@ function renderAdminDash() {
     : `<div class="adm-users">` + users.map((u) => `
         <div class="adm-user">
           <div class="au-top">
+            ${typeof u.photo === "string" && u.photo.startsWith("data:image/") ? `<img class="au-pfp" src="${u.photo}" alt="" loading="lazy">` : ""}
             <span class="au-name">${u.name ? `${esc(u.name)} <span class="au-roll">${esc(u.username)}</span>` : esc(u.username)}</span>
             <span class="au-when">${esc(timeAgo(u.last_active))}</span>
           </div>

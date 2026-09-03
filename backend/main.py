@@ -435,6 +435,21 @@ def extract_contacts(page_html: str) -> dict:
     return out
 
 
+def make_thumbnail(photo: str, size: int = 64) -> str:
+    """Downscale a base64 data-URI avatar to a small JPEG data URI for storage
+    (raw ERP photos run ~300KB — far too heavy for the admin user list).
+    Returns "" on anything unparseable."""
+    try:
+        _, b64 = photo.split(",", 1)
+        img = Image.open(io.BytesIO(base64.b64decode(b64))).convert("RGB")
+        img.thumbnail((size, size))
+        buf = io.BytesIO()
+        img.save(buf, "JPEG", quality=80)
+        return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
+    except Exception:
+        return ""
+
+
 NET_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, httpx.NetworkError, httpx.TimeoutException)
 
 
@@ -656,12 +671,17 @@ async def data_api(request: Request, table: str, row_id: str | None = None):
 _admin_calls: dict[str, list[float]] = {}
 
 
-def log_user(username: str, name: str) -> None:
-    """Fire-and-forget upsert of the user's display name for the admin page."""
+def log_user(username: str, name: str, photo: str = "") -> None:
+    """Fire-and-forget upsert of the user's display name (+ avatar thumbnail,
+    when the scraped page had one) for the admin page."""
     if not SUPABASE_SERVICE_KEY or not username or not name:
         return
+    thumb = make_thumbnail(photo) if photo else ""
 
     async def _send():
+        payload = {"username": username, "name": name, "last_seen": datetime.utcnow().isoformat() + "Z"}
+        if thumb:
+            payload["photo"] = thumb
         try:
             async with httpx.AsyncClient(verify=True, timeout=5) as c:
                 await c.post(
@@ -672,7 +692,7 @@ def log_user(username: str, name: str) -> None:
                         "Content-Type": "application/json",
                         "Prefer": "resolution=merge-duplicates,return=minimal",
                     },
-                    json={"username": username, "name": name, "last_seen": datetime.utcnow().isoformat() + "Z"},
+                    json=payload,
                 )
         except Exception as e:
             logger.warning("[METRICS] log_user failed: %s", e)
@@ -772,8 +792,19 @@ async def admin_stats(request: Request, admin_token: str = Form(default="")):
                     "apikey": SUPABASE_SERVICE_KEY,
                     "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
                 },
-                params={"select": "username,name,phone,parent_phone"},
+                params={"select": "username,name,phone,parent_phone,photo"},
             )
+            if r2.status_code != 200:
+                # The photo column may not exist yet (alter table pending) —
+                # fall back to the base set so the admin page keeps working.
+                r2 = await c.get(
+                    f"{SUPABASE_URL}/rest/v1/app_users",
+                    headers={
+                        "apikey": SUPABASE_SERVICE_KEY,
+                        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                    },
+                    params={"select": "username,name,phone,parent_phone"},
+                )
             profiles = {u["username"]: u for u in (r2.json() if r2.status_code == 200 else [])}
     except Exception as e:
         logger.error("[ADMIN] metrics query failed: %s", e)
@@ -806,7 +837,7 @@ async def admin_stats(request: Request, admin_token: str = Form(default="")):
     for u, rec in by_user.items():
         p = profiles.get(u) or {}
         users.append({"username": u, "name": p.get("name") or "", "phone": p.get("phone") or "",
-                      "parent_phone": p.get("parent_phone") or "", **rec})
+                      "parent_phone": p.get("parent_phone") or "", "photo": p.get("photo") or "", **rec})
     users.sort(key=lambda x: x["last_active"], reverse=True)
     return {
         "success": True,
@@ -835,7 +866,7 @@ async def login(request: Request, username: str = Form(...), password: str = For
             log_event(username, "login")
             profile = extract_profile(login_response.text)
             if profile.get("name"):
-                log_user(username, profile["name"])
+                log_user(username, profile["name"], profile.get("photo", ""))
             scrape_contacts_bg(username, cookies)
             return {
                 "success": True,
@@ -945,7 +976,7 @@ async def fetch_attendance(
         log_event(username, "fetch_attendance", {"year": academic_year_code, "sem": semester_id, "rows": len(attendance), "ms": int((time.time() - start) * 1000)})
         _p = extract_profile(html)
         if _p.get("name"):
-            log_user(username, _p["name"])
+            log_user(username, _p["name"], _p.get("photo", ""))
         scrape_contacts_bg(username, cookie_jar)
         return {"success": True, "attendance": attendance, **session_payload(cookie_jar, php_sess_id, server_id, page_csrf)}
     except HTTPException:
@@ -1018,7 +1049,7 @@ async def fetch_timetable(
         log_event(username, "fetch_timetable", {"year": academic_year_code, "sem": semester_id, "days": len(timetable), "ms": int((time.time() - start) * 1000)})
         _p = extract_profile(html)
         if _p.get("name"):
-            log_user(username, _p["name"])
+            log_user(username, _p["name"], _p.get("photo", ""))
         return {"success": True, "timetable": timetable, **session_payload(cookie_jar, php_sess_id, server_id, unquote(csrf_cookie) if csrf_cookie else "")}
     except HTTPException:
         raise
@@ -1302,7 +1333,7 @@ async def fetch_profile(
             raise HTTPException(status_code=404, detail="Profile not found on dashboard page.")
         log_event(username, "fetch_profile")
         if profile.get("name"):
-            log_user(username, profile["name"])
+            log_user(username, profile["name"], profile.get("photo", ""))
         return {"success": True, "profile": profile, "app_token": issue_app_token(username),
                 **session_payload(cookie_jar, php_sess_id, server_id, unquote(csrf_cookie) if csrf_cookie else "")}
     except HTTPException:
