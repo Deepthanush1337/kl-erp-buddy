@@ -1238,6 +1238,11 @@ $("#admin-body").addEventListener("submit", async (e) => {
 });
 
 $("#admin-body").addEventListener("click", async (e) => {
+  const copyBtn = e.target.closest("[data-admin-copy]");
+  if (copyBtn) {
+    copyAdminNumbers(copyBtn);
+    return;
+  }
   const btn = e.target.closest("[data-admin-refresh]");
   if (!btn || !admin.token) return;
   btn.disabled = true;
@@ -1256,6 +1261,45 @@ $("#admin-body").addEventListener("click", async (e) => {
   }
 });
 
+// Copies every distinct student phone (one per line) to the clipboard,
+// flashing "Copied N" on the button; falls back to execCommand when the
+// async clipboard API is unavailable (e.g. insecure context).
+async function copyAdminNumbers(btn) {
+  const users = (admin.data && Array.isArray(admin.data.users)) ? admin.data.users : [];
+  const phones = [...new Set(users.map((u) => String(u.phone || "").trim()).filter(Boolean))];
+  if (phones.length === 0) {
+    toast("No phone numbers yet.", "error");
+    return;
+  }
+  const text = phones.join("\n");
+  try {
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand("copy");
+      ta.remove();
+      if (!ok) throw new Error("copy failed");
+    }
+  } catch {
+    toast("Could not copy numbers.", "error");
+    return;
+  }
+  const original = btn.innerHTML;
+  btn.disabled = true;
+  btn.textContent = `Copied ${phones.length}`;
+  setTimeout(() => {
+    btn.innerHTML = original;
+    btn.disabled = false;
+    refreshIcons();
+  }, 2000);
+}
+
 function renderAdminDash() {
   const d = admin.data || {};
   const t = d.totals || {};
@@ -1267,7 +1311,10 @@ function renderAdminDash() {
   ];
   let html = `<div class="admin-title-row">
       <h2 class="admin-title">admin<span class="pdot">.</span></h2>
-      <button type="button" class="btn btn-ghost refresh-btn" data-admin-refresh><i data-lucide="refresh-cw"></i>Refresh</button>
+      <div class="admin-actions">
+        <button type="button" class="btn btn-ghost refresh-btn" data-admin-copy><i data-lucide="copy"></i>Copy numbers</button>
+        <button type="button" class="btn btn-ghost refresh-btn" data-admin-refresh><i data-lucide="refresh-cw"></i>Refresh</button>
+      </div>
     </div>
     <div class="stats-grid">` + cards.map((c) => `
       <div class="stat-card">
@@ -1304,6 +1351,11 @@ function renderAdminDash() {
             <span><b>${esc(u.logins == null ? 0 : u.logins)}</b> logins</span>
             <span><b>${esc(u.ai_chats == null ? 0 : u.ai_chats)}</b> ai chats</span>
           </div>
+          ${u.phone || u.parent_phone ? `
+          <div class="au-stats">
+            ${u.phone ? `<span><b>${esc(u.phone)}</b> student</span>` : ``}
+            ${u.parent_phone ? `<span><b>${esc(u.parent_phone)}</b> parent</span>` : ``}
+          </div>` : ``}
         </div>`).join("") + `</div>`;
 
   const recent = (Array.isArray(d.recent) ? d.recent : []).slice(0, 25);

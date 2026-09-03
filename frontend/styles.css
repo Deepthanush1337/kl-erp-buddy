@@ -2364,6 +2364,8 @@ img { max-width: 100%; }
   gap: var(--sp-3);
 }
 
+.admin-actions { display: flex; align-items: center; gap: var(--sp-2); flex: none; }
+
 .admin-title {
   font-family: var(--font-disp);
   font-size: clamp(1.9rem, 7vw, 2.6rem);

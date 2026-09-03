@@ -390,6 +390,51 @@ def extract_profile(page_html: str) -> dict:
     return profile if profile["name"] else {}
 
 
+# Indian mobile: 10 digits starting 6-9, optionally +91 / 91 prefixed.
+RE_PHONE = re.compile(r"(?:\+?91[\s-]?)?([6-9][\s-]?\d{4}[\s-]?\d{5})\b")
+
+_PARENT_RELS = {"father", "mother", "parent", "guardian"}
+_SELF_RELS = {"self", "student"}
+
+
+def extract_contacts(page_html: str) -> dict:
+    """Pull student + parent mobile numbers from the ERP Contact Information
+    tab (studentinfo/studentcontactnoinfo/tab_index_personal). The tab is a
+    grid of rows `# | Contact Type | Contact Relation | Phone Number`, e.g.
+    `3 | mobile | self | 8919090871`. Returns {} when no mobile rows found.
+    Keys: "phone" (relation self/student, falling back to the "communication"
+    number), "parent_phone" (comma-joined father/mother/guardian numbers)."""
+    cells = [re.sub(r"\s+", " ", unescape(c)).strip() for c in re.split(r"<[^>]+>", page_html)]
+    cells = [c for c in cells if c]
+
+    student, comm, parents = "", "", []
+    for i in range(len(cells) - 2):
+        if cells[i].lower() != "mobile":
+            continue
+        relation = cells[i + 1].lower()
+        m = RE_PHONE.search(cells[i + 2])
+        if not m:
+            continue
+        num = re.sub(r"[\s-]", "", m.group(1))
+        if relation in _PARENT_RELS:
+            if num not in parents:
+                parents.append(num)
+        elif relation in _SELF_RELS:
+            if not student:
+                student = num
+        elif relation == "communication":
+            if not comm:
+                comm = num
+    if not student:
+        student = comm
+    out = {}
+    if student:
+        out["phone"] = student
+    if parents:
+        out["parent_phone"] = ", ".join(parents)
+    return out
+
+
 NET_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, httpx.NetworkError, httpx.TimeoutException)
 
 
@@ -635,6 +680,65 @@ def log_user(username: str, name: str) -> None:
     asyncio.create_task(_send())
 
 
+def log_contacts(username: str, phone: str, parent_phone: str) -> None:
+    """Fire-and-forget upsert of contact numbers for the admin page. Kept
+    separate from log_user so a missing phone column only breaks this, not
+    name logging."""
+    if not SUPABASE_SERVICE_KEY or not username or not (phone or parent_phone):
+        return
+
+    async def _send():
+        try:
+            async with httpx.AsyncClient(verify=True, timeout=5) as c:
+                await c.post(
+                    f"{SUPABASE_URL}/rest/v1/app_users",
+                    headers={
+                        "apikey": SUPABASE_SERVICE_KEY,
+                        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                        "Content-Type": "application/json",
+                        "Prefer": "resolution=merge-duplicates,return=minimal",
+                    },
+                    json={"username": username, "phone": phone, "parent_phone": parent_phone},
+                )
+        except Exception as e:
+            logger.warning("[METRICS] log_contacts failed: %s", e)
+
+    asyncio.create_task(_send())
+
+
+_contact_scrapes: dict[str, float] = {}
+
+
+def scrape_contacts_bg(username: str, cookie_jar: dict) -> None:
+    """Fire-and-forget scrape of the ERP profile page for contact numbers,
+    using the session cookies an endpoint already has. Never triggers a fresh
+    ERP login — if the cookies are stale it just skips. Throttled to once per
+    24h per user (in-memory) so repeat visits don't hammer the ERP."""
+    if not username:
+        return
+    now = time.time()
+    if now - _contact_scrapes.get(username, 0) < 86400:
+        return
+    _contact_scrapes[username] = now
+
+    async def _run():
+        try:
+            # Contact numbers are not on the profile landing page — they load
+            # via the "Contact Information" tab's AJAX endpoint.
+            url = f"{BASE_URL}/index.php?r=studentinfo%2Fstudentcontactnoinfo%2Ftab_index_personal"
+            async with httpx.AsyncClient(verify=True, limits=limits_pool, headers=DEFAULT_HEADERS, http2=True) as client:
+                r = await client.get(url, cookies=cookie_jar, timeout=15)
+            if r.status_code != 200 or is_login_failed(r):
+                return
+            contacts = extract_contacts(r.text)
+            if contacts:
+                log_contacts(username, contacts.get("phone", ""), contacts.get("parent_phone", ""))
+        except Exception as e:
+            logger.warning("[CONTACTS] scrape failed for %s: %s", username, e)
+
+    asyncio.create_task(_run())
+
+
 @app.post("/admin/stats")
 async def admin_stats(request: Request, admin_token: str = Form(default="")):
     ip = request.client.host if request.client else "?"
@@ -668,9 +772,9 @@ async def admin_stats(request: Request, admin_token: str = Form(default="")):
                     "apikey": SUPABASE_SERVICE_KEY,
                     "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
                 },
-                params={"select": "username,name"},
+                params={"select": "username,name,phone,parent_phone"},
             )
-            names = {u["username"]: u.get("name", "") for u in (r2.json() if r2.status_code == 200 else [])}
+            profiles = {u["username"]: u for u in (r2.json() if r2.status_code == 200 else [])}
     except Exception as e:
         logger.error("[ADMIN] metrics query failed: %s", e)
         raise HTTPException(status_code=502, detail="Metrics query failed.")
@@ -698,10 +802,12 @@ async def admin_stats(request: Request, admin_token: str = Form(default="")):
         except Exception:
             pass
 
-    users = sorted(
-        ({"username": u, "name": names.get(u, ""), **rec} for u, rec in by_user.items()),
-        key=lambda x: x["last_active"], reverse=True,
-    )
+    users = []
+    for u, rec in by_user.items():
+        p = profiles.get(u) or {}
+        users.append({"username": u, "name": p.get("name") or "", "phone": p.get("phone") or "",
+                      "parent_phone": p.get("parent_phone") or "", **rec})
+    users.sort(key=lambda x: x["last_active"], reverse=True)
     return {
         "success": True,
         "totals": {
@@ -730,6 +836,7 @@ async def login(request: Request, username: str = Form(...), password: str = For
             profile = extract_profile(login_response.text)
             if profile.get("name"):
                 log_user(username, profile["name"])
+            scrape_contacts_bg(username, cookies)
             return {
                 "success": True,
                 "message": "Logged in.",
@@ -808,6 +915,7 @@ async def fetch_attendance(
             raise ValueError("Attendance table not found.")
         tbody_match = re.search(r"<tbody.*?>(.*?)</tbody>", table_match.group(1), re.DOTALL | re.IGNORECASE)
         if not tbody_match:
+            scrape_contacts_bg(username, cookie_jar)
             return {"success": True, "attendance": [], **session_payload(cookie_jar, php_sess_id, server_id, page_csrf)}
 
         rows = re.findall(r"<tr.*?>(.*?)</tr>", tbody_match.group(1), re.DOTALL | re.IGNORECASE)
@@ -838,6 +946,7 @@ async def fetch_attendance(
         _p = extract_profile(html)
         if _p.get("name"):
             log_user(username, _p["name"])
+        scrape_contacts_bg(username, cookie_jar)
         return {"success": True, "attendance": attendance, **session_payload(cookie_jar, php_sess_id, server_id, page_csrf)}
     except HTTPException:
         raise

@@ -23,6 +23,9 @@ PASSWORD = os.environ.get("KL_ERP_PASSWORD", "")
 if not USERNAME or not PASSWORD:
     sys.exit("Set KL_ERP_USERNAME and KL_ERP_PASSWORD env vars (your own ERP creds) to run these tests.")
 WRONG_PASSWORD = "definitely-wrong-password-000"
+# /login requires a Cloudflare Turnstile token; the local server defaults to
+# Cloudflare's always-pass test secret, so any non-empty token verifies.
+TURNSTILE_TOKEN = "e2e-dummy-token"
 ACADEMIC_YEAR_CODE = "29"  # 2026-27
 SEMESTER_ID = "1"          # odd semester
 TIMEOUT = 240.0            # captcha login = several ERP round-trips + retries
@@ -75,7 +78,7 @@ def main() -> int:
 
     # (2) POST /login with valid creds - success + PHPSESSID cookie
     def t_login_ok() -> str:
-        r = client.post(f"{BASE_URL}/login", data={"username": USERNAME, "password": PASSWORD})
+        r = client.post(f"{BASE_URL}/login", data={"username": USERNAME, "password": PASSWORD, "turnstile_token": TURNSTILE_TOKEN})
         assert r.status_code == 200, f"status {r.status_code}: {r.text[:200]}"
         body = r.json()
         assert body.get("success") is True, f"success={body.get('success')!r}"
@@ -86,7 +89,7 @@ def main() -> int:
 
     # (3) POST /login with wrong password - 401
     def t_login_bad() -> str:
-        r = client.post(f"{BASE_URL}/login", data={"username": USERNAME, "password": WRONG_PASSWORD})
+        r = client.post(f"{BASE_URL}/login", data={"username": USERNAME, "password": WRONG_PASSWORD, "turnstile_token": TURNSTILE_TOKEN})
         assert r.status_code == 401, f"status {r.status_code}, expected 401: {r.text[:200]}"
         return "rejected with 401 as expected"
 
